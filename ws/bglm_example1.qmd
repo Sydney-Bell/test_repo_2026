@@ -87,14 +87,12 @@ library(emmeans)         #for marginal means etc
 library(broom)           #for tidying outputs
 library(tidybayes)       #for more tidying outputs
 library(HDInterval)      #for HPD intervals
-library(ggeffects)       #for partial plots
 library(broom.mixed)     #for summarising models
 library(posterior)       #for posterior draws
-library(ggeffects)       #for partial effects plots
 library(patchwork)       #for multi-panel figures
 library(bayestestR)      #for ROPE
 library(easystats)       #framework for stats, modelling and visualisation
-library(marginaleffects) #for partial effect plots
+library(modelsummary)
 library(tinytable)       #for tidy tables
 theme_set(theme_grey())  #put the default ggplot theme back
 source('helperFunctions.R')
@@ -248,7 +246,29 @@ y_i &\sim{} \mathcal{N}(\mu_i, \sigma^2)\\
 \end{align}
 $$
 
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
 
+fert |> ggplot(aes(y = YIELD)) +
+  geom_boxplot()
+
+#looks symmetrical. Doesn't mean its normal but there's nothing obviously wrong 
+```
+
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+fert |> ggplot(aes(y = YIELD, x = FERTILIZER)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+#looks linear!!
+#variance looks the same across all points
+```
 
 # Fit the model
 
