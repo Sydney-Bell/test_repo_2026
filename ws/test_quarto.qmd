@@ -1,0 +1,77 @@
+---
+title: "Untitled1"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** *button* a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+#| label: label
+#| eval: true
+#| echo: true
+
+#eval makes sure a code is ran
+#echo is showing the output without the code
+#The `echo: false` option disables the printing of code (only output is displayed).
+
+```
+
+```{r}
+#| label: one plus one
+1 + 1
+```
+
+Install packages
+
+```{r}
+#| label: install packages
+#| eval: false
+#| echo: false
+
+remotes::install_github("jmgirard/standist")
+install.packages("DHARMa")
+install.packages("knitr")
+install.packages("emmeans")
+install.packages("tidybayes")
+install.packages("patchwork")
+install.packages("easystats")
+install.packages("modelbased")
+install.packages("broom")
+install.packages("broom.mixed")
+install.packages("coda")
+install.packages("bayesplot")
+install.packages("HDInterval")
+install.packages("rstan")
+install.packages("posterior")
+install.packages("bayestestR")
+install.packages("tinytable")
+install.packages("report")
+
+library(standist)
+library("DHARMa")
+library("knitr")
+library("emmeans")
+library("tidybayes")
+library("patchwork")
+library("easystats")
+library("modelbased")
+library("broom")
+library("broom.mixed")
+library("coda")
+library("bayesplot")
+library("HDInterval")
+library("rstan")
+library("posterior")
+library("bayestestR")
+library("tinytable")
+library("report")
+```
+
+
