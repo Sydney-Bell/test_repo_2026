@@ -389,8 +389,174 @@ http://mc-stan.org/rstanarm/articles/priors.html
    prior (`decov` which is a decomposition of the variance and
    covariance matrix).
 
+```{r}
+#| label: informing priors for intercept
+#| eval: true
+#| echo: true
+
+#median is more robust and not influenced heavily by outliers (except for zero-inflated data)
+fert$YIELD |> median()
+
+#mad is more robust than SD (median absolute deviation)
+fert$YIELD |> mad()
+
+#diagnostics 
+x <- rnorm(n = 1000, mean = 161.5, sd = 90)
+
+ggplot(fert, aes(y + YIELD))+
+  geom_boxplot(aes(x = 1))+
+  geom_boxplot(data = data.frame(x = 2, y = x),
+               aes(x = x, y = y))
+```
+
+```{r}
+#| label: prior for slope
+#| eval: true
+#| echo: true
+
+#is usually just the difference between the smallest and largest y values divided by 1
+#but usually just use 0 as the prior mean, and the same variance as the intercept that we already calculated (90 in this case)
+
+```
+
+```{r}
+#| label: prior for sigma/noise/variance
+#| eval: true
+#| echo: true
+
+#this needs to be constrained, variance cannot go below 0 --> so we use a half t-distribution. Think of it
+#as a very flat normal distribution
+
+#df = 3
+#sd = 90
 
 
+```
+
+#defining formula
+```{r}
+#| label: define formula
+#| eval: true
+#| echo: true
+
+#YIELD = response
+#FERTILIZER = predictor (scaled)
+#bf = bayesian formula --> can do fancy things
+
+#put scale() in the formula instead of making a new variable so the model can automatically back transform
+#you dont have to manually do this
+
+fert_form <- bf(YIELD ~ scale(FERTILIZER))
+
+#ask brms package for its recommended priors just to check
+get_prior(fert_form, data = fert)
+
+#b = slope
+#it says to use a flat prior for all predictors (first row) or specify them all individually (second row)
+#(flat) = -infinity to +infinity, unproper priors, usually creates a poor model where the sampler drifts off to areas that are not informative
+#lb = lower bound, so lb = 0 always for sigma, cant have variance below 0
+
+```
+
+```{r}
+#| label: define priors
+#| eval: true
+#| echo: true
+
+priors <- prior(normal(161, 90), class = "Intercept") +
+  prior(normal(0,90), class="b") +
+  prior(student_t(3, 0, 90), class="sigma")
+
+```
+#fit model with priors only, look at predictions and see if they are logical
+#add cache to chunks that take a while, speeds up rendering.
+#never cache a chunk that has library() in it
+```{r}
+#| label: prior only model
+#| eval: true
+#| echo: true
+#| cache: true
+
+#stan uses no u turn sampler (NUTS)
+fert_brm2 <- brm(fert_form,
+                 data=fert,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0)
+
+```
+
+```{r}
+#| label: plot model fert_brm2
+#| eval: true
+#| echo: true
+
+fert_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#now self...do these look reasonable in some way??
+#could these priors allow for a negative trend? YES --> look between 0 and 125 on x axis
+#priors are not too wide on y-axis
+#therefore, our priors are weakly informative (not driving the model), which is what we want
+```
+
+#sample from prior and data
+```{r}
+#| label: sample from prior and data
+#| eval: true
+#| echo: true
+#| cache: true
+
+fert_brm3 <- update(fert_brm2, sample_prior = 'yes', refresh = 0)
+
+```
+```{r}
+#| label: plot model fert_brm3
+#| eval: true
+#| echo: true
+
+fert_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#now model looks much more refined
+#and looks like data is driving the trend, not priors which is what we want
+```
+```{r}
+#| label: figure out what is stored in model
+#| eval: true
+#| echo: true
+
+#models will center predictors for you because its so important? At least for brms
+#that's why there are duplicate Intercepts
+
+fert_brm3 |> get_variables()
+
+#plot slope
+fert_brm3 |>  hypothesis('scaleFERTILIZER = 0') |> plot()
+
+#posterior and prior look very different on graph (prior is wider than posterior), therefore, the data is what is driving the model
+#this is what we want!
+
+#plot sigma
+fert_brm3 |>  hypothesis('sigma = 0', class = '') |> plot()
+```
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+fert_brm3 |> SUYR_prior_and_posterior()
+
+#proof that priors are influential (thats what we want)
+#this function helps show you what prior is problematic
+```
 
 # MCMC sampling diagnostics
 
@@ -458,6 +624,56 @@ might not be accurate.
 |           | Scale reduction   | `ggs_grb`              | `ggs_grb(ggs(mod))`              | `ggs_grb(ggs(mod))`                |
 |           |                   |                        |                                  |                                    |
 
+```{r}
+#| label: traceplots
+#| eval: true
+#| echo: true
+
+fert_brm3$fit |> stan_trace()
+#focused on the top 3
+#well-mixed
+#sigma stops at y=0 so makes sense that it doesn't look symmetrical
+
+#include warmup to see if it was needed
+fert_brm3$fit |> stan_trace(inc_warmup = TRUE)
+#in this case we could've done with a smaller warm up
+```
+```{r}
+#| label: autocorrelation plot
+#| eval: true
+#| echo: true
+
+fert_brm3$fit |> stan_ac()
+#standard to have a bar at 0
+#at a lag of 1 (x-axis) we don't want to have large autocorrelation --> no bias between draws
+#therefore, thinning was adequate
+```
+
+```{r}
+#| label: convergence
+#| eval: true
+#| echo: true
+
+#how well did chains converge
+fert_brm3$fit |> stan_rhat()
+#want values <1.01
+#if they are above 1.01 then the chains were different from each other
+      # ^ might need to add more iterations or check priors 
+```
+
+```{r}
+#| label: effective sample size
+#| eval: true
+#| echo: true
+
+fert_brm3$fit |> stan_ess()
+
+#uses no u turn sampler (NUTS) --> not your actual data
+#tells us how many draws were effective out of all of them
+#want this to be >0.5, and closer to 1 the better
+#its okay if they are <0.5, but this means the model isn't efficient and the priors were probably too large,
+#causing the sampler to go too far
+```
 
 # Model validation
 
@@ -474,7 +690,16 @@ might not be accurate.
 |           | Partial plot       | `ppc_ribbon`                 | `pp_check(mod, x=, plotfun='ribbon')`                 | `pp_check(mod, x=, type='ribbon')`                 |
 |           |                   |                              |                                                       |                                                    |
 
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
 
+fert_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+#our model reconstructs the data quite well
+```
 
 # Partial effects plots
 
