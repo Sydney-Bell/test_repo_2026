@@ -84,11 +84,10 @@ library(rstan)         #for interfacing with STAN
 library(emmeans)       #for marginal means etc
 library(broom)         #for tidying outputs
 library(tidybayes)     #for more tidying outputs
-library(ggeffects)     #for partial plots
 library(broom.mixed)   #for summarising models
-library(ggeffects)     #for partial effects plots
 library(bayestestR)    #for ROPE
 library(easystats)     #for the easystats ecosystem
+library(ggeffects)
 library(patchwork)     #for multiple plots
 theme_set(theme_grey()) #put the default ggplot theme back
 source("helperFunctions.R")
@@ -140,10 +139,33 @@ The aim of the analysis is to investigate the relationship between island perime
 #| eval: true
 polis <- read_csv("../data/polis.csv", trim_ws = TRUE)
 ```
+# Bernoulli distribution
 
+Bernoulli is a special case of binomial.
+
+- Variance should equal 0
+- Don't assume linearity
 
 
 # Exploratory data analysis
+
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+polis |> 
+  ggplot(aes(y = PA, x = RATIO)) +
+  geom_point()
+#higher presence of lizards when island ration is small
+
+#now add in curve to show the Bernoulli shape
+polis |> 
+  ggplot(aes(y = PA, x = RATIO)) +
+  geom_point() +
+  geom_smooth(method='glm', formula=y~x,
+              method.args=list(family='binomial'))
+```
 
 
 The individual responses ($y_i$, observed presence/absence of Uta
@@ -193,23 +215,251 @@ $$
 
 # Fit the model
 
+```{r}
+#| label: define formula
+#| eval: true
+#| echo: true
+
+#trials(1) represents the total number of trails, like 2 cats were female out of 7 total cats then it would be female|totalcats
+polis_form <- bf(PA ~ RATIO, family = bernoulli(link = "logit"))
+
+get_prior(polis_form, data = polis)
+
+#median response should be ~0.5 because we have 0s and 1s.
+
+qlogis(0.5) #how to back transform a logit (opposite of plogis)
+#on logit scale the median will be 0
+
+#priors have to be on the scale of the logit link
+plogis(1)
+plogis(-1)
+
+#slope mean will always be 0
+#slope variance will be 1
+
+#intercept mean will be 0
+#intercept variance will be 1
+
+#set priors
+priors <- prior(normal(0,1), class = 'Intercept') +
+  prior(normal(0,1), class = 'b')
+```
+
+```{r}
+#| label: prior only model
+#| eval: true
+#| echo: true
+#| cache: true
+
+#stan uses no u turn sampler (NUTS)
+polis_brm2 <- brm(polis_form,
+                 data=polis,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0)
+
+```
+```{r}
+#| label: plot model fert_brm2
+#| eval: true
+#| echo: true
+
+polis_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#no matter what priors you use, the grey ribbon will go 0-1. We do have a gap at 20 so that's a good sign
+#this plot isn't very informative for bernoulli
+```
+```{r}
+#| label: sample from prior and data
+#| eval: true
+#| echo: true
+#| cache: true
+
+polis_brm3 <- update(polis_brm2, sample_prior = 'yes', refresh = 0)
+
+```
+```{r}
+#| label: plot model polis_brm3
+#| eval: true
+#| echo: true
+
+polis_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#now model looks much more refined
+#and looks like data is driving the trend, not priors which is what we want
+```
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+polis_brm3 |> SUYR_prior_and_posterior()
+
+#proof that priors are influential (thats what we want)
+#this function helps show you what prior is problematic
+
+#there's no way b posterior is the same as the prior, so no way priors are driving the trends
+```
 
 # MCMC sampling diagnostics
 
+```{r}
+#| label: traceplots
+#| eval: true
+#| echo: true
+
+polis_brm3$fit |> stan_trace()
+
+polis_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+#b_Intercept and Intercept are not the same because we forgot to center the x-axis/continuous variable
+```
+
+```{r}
+#| label: autocorrelation plot
+#| eval: true
+#| echo: true
+
+polis_brm3$fit |> stan_ac()
+#standard to have a bar at 0
+#at a lag of 1 (x-axis) we don't want to have large autocorrelation --> no bias between draws
+#therefore, thinning was adequate
+```
+
+```{r}
+#| label: convergence
+#| eval: true
+#| echo: true
+
+#how well did chains converge
+polis_brm3$fit |> stan_rhat()
+#want values <1.01
+#if they are above 1.01 then the chains were different from each other
+      # ^ might need to add more iterations or check priors 
+```
+
+```{r}
+#| label: effective sample size
+#| eval: true
+#| echo: true
+
+polis_brm3$fit |> stan_ess()
+
+#uses no u turn sampler (NUTS) --> not your actual data
+#tells us how many draws were effective out of all of them
+#want this to be >0.5, and closer to 1 the better
+#its okay if they are <0.5, but this means the model isn't efficient and the priors were probably too large,
+#causing the sampler to go too far
+```
 
 # Model validation
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
 
+polis_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+#our model reconstructs the data quite well
+```
+
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+#fert.resids <- make_brms_dharma_res(fert_brm3, integerResponse = FALSE)
+#testUniformity(fert.resids)
+#plotResiduals(fert.resids)
+
+#another option
+preds <- polis_brm3 |> posterior_predict(ndraws=250, summary=FALSE)
+polis.resids <- createDHARMa(simulatedResponse = t(preds),
+                            observedResponse = polis$PA,
+                            fittedPredictedResponse = apply(preds, 2, median),
+                            integerResponse = TRUE)
+polis.resids |> plot()
+
+#QQ Plot: plots quantiles (median, upper, lower, etc)
+#straight line applies that residuals follow nominated distribution (normal in this case)
+#you want straight line
+#KS: Smirnoff test for conformity to distribution --> if it was significant, maybe pay attention to it and see if you can change anything --> but don't blindly accept this
+#Dispersion: ratio of variance to the mean --> for normal distribution we want close to 1
+#Outlier test: if in red, check and see if it really is a problem
+
+#residual plot: dont want any patterns (fan shape = unequal variances)
+#we have 2 lines but that isn't a pattern, they were just binned
+```
 
 # Partial effects plots
 
+```{r}
+#| label: partial effects plots
+#| eval: true
+#| echo: true
 
-
+polis_brm3 |> conditional_effects() |> plot(points = TRUE)
+```
 # Model investigation
+```{r}
+#| label: summary
+#| eval: true
+#| echo: true
 
+polis_brm3 |> summary()
+
+#summary values are always on the scale of the link function
+#back transform intercept
+plogis(4.43) #so when an island is really round (Ratio = 0), the probability of presence is 0.99
+exp(4.41) #odds ratio: the lizards are 82 times more likely to be present when the island is round (Ratio = 0)
+
+#now back transform slope
+#can only be converted to odds, because the rate of change is never the same
+exp(-0.26) #odds ratio: for every 1 unit change in Ratio, the odds of the lizard being present decline by a factor of 0.77
+#OR a -23% decrease
+100 * (0.77 -1)
+
+#PROBABILITY SCALE:
+# >0.85 = evidence for that is weak
+# <0.85 = no evidence at all
+# >0.9 = there is evidence
+# >0.95 = the evidence is strong
+```
+
+```{r}
+#| label: table on log odds scale
+#| eval: true
+#| echo: true
+
+polis_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  P = ~mean(.x < 1))
+
+#summary gives mean BUT this gives us the MEDIAN which is more robust
+
+#our table is expentiated and exp(0) = 1 so that's why we use 1 in the calculation of P
+
+#strong evidence of a negative relationship between lizard presence and perimeter to area ratio.
+```
 
 # Further analyses
 
 # Summary figure
-
 
 # References
