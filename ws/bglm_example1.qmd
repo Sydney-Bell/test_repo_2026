@@ -700,9 +700,136 @@ fert_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
 #dark line is actual distribution of our data
 #our model reconstructs the data quite well
 ```
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+fert.resids <- make_brms_dharma_res(fert_brm3, integerResponse = FALSE)
+testUniformity(fert.resids)
+plotResiduals(fert.resids)
+
+#another option
+preds <- fert_brm3 |> posterior_predict(ndraws=250, summary=FALSE)
+fert.resids <- createDHARMa(simulatedResponse = t(preds),
+                            observedResponse = fert$YIELD,
+                            fittedPredictedResponse = apply(preds, 2, median),
+                            integerResponse = FALSE)
+fert.resids |> plot()
+
+#QQ Plot: plots quantiles (median, upper, lower, etc)
+#straight line applies that residuals follow nominated distribution (normal in this case)
+#you want straight line
+#KS: Smirnoff test for conformity to distribution --> if it was significant, maybe pay attention to it and see if you can change anything --> but don't blindly accept this
+#Dispersion: ratio of variance to the mean --> for normal distribution we want close to 1
+#Outlier test: if in red, check and see if it really is a problem
+
+#residual plot: dont want any patterns (fan shape = unequal variances)
+```
+
 
 # Partial effects plots
+```{r}
+#| label: label
+#| eval: true
+#| echo: true
 
+fert_brm3 |> conditional_effects() |> plot(points = TRUE)
+```
+
+```{r}
+#| label: summary
+#| eval: true
+#| echo: true
+
+fert_brm3 |> summary()
+
+#CI = credibility interval
+#you want Effective sample size (ESS) >1000 --> ideally close to the total post-warmup draws
+#main thing that establishes if there's a relationship or not is the slope (scaleFERTILIZER)
+  # for every one unit change in scaleFERTILIZER we expect the YIELD to increase by 61.14
+  #can say we're 95% sure the slope is positive, strong evidence of an effect of fertilizer concentration because   CI doesn't include 0
+
+#PROBABILITY SCALE:
+# >0.85 = evidence for that is weak
+# <0.85 = no evidence at all
+# >0.9 = there is evidence
+# >0.95 = the evidence is strong
+```
+```{r}
+#| label: summary 2
+#| eval: true
+#| echo: true
+
+fert_brm3 |> 
+  summarise_draws(median,
+                HDInterval::hdi,
+                rhat, length, ess_bulk, ess_tail)
+
+#HDI = highest probability density intervals --> more robust than quantiles
+#length = number of draws
+#efficency of sampling the bulk and tails of the distribution, low ess in tails = priors probably too wide
+```
+```{r}
+#| label: turn draws into dataframe
+#| eval: true
+#| echo: true
+
+fert_brm3 |> as_draws_df()
+
+#you get from Bayesian models a distribution of slope and a distribution of intercept
+
+fert_brm3 |> 
+  as_draws_df() |> 
+  pull(b_scaleFERTILIZER) |> 
+  hist()
+
+fert_brm3 |> 
+  as_draws_df() |> 
+  pull(b_scaleFERTILIZER) |> 
+  median()
+
+fert_brm3 |> 
+  as_draws_df() |> 
+  ggplot(aes(x = b_scaleFERTILIZER)) +
+  geom_histogram()
+#distribution is all above 0 so we are really sure there is a relationship
+
+#what % are above 60?
+x <- fert_brm3 |> 
+  as_draws_df() |> 
+  pull(b_scaleFERTILIZER)
+
+x > 0
+sum(x > 0)
+sum(x > 0) / 2400
+#OR
+mean(x > 0)
+
+#correct way to do this moving forward
+#P = bayesian probability
+#~mean = if you need () in the function then use the ~
+fert_brm3 |> 
+  summarise_draws(median,
+                HDInterval::hdi,
+                P = ~mean(.x > 0),
+                rhat, length, ess_bulk, ess_tail)
+
+#P is only important for the slope b_scaleFERTILIZER. Ignore it for Intercept and sigma
+
+#get rid of things we don't need
+fert_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$")) |> #pattern must start with b_ or sigma exactly
+  summarise_draws(median,
+                HDInterval::hdi,
+                P = ~mean(.x > 0),
+                rhat, length, ess_bulk, ess_tail)
+
+fert_brm3 |> bayes_R2(summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 92% of YIELD can be explained by FERTILIZER
+```
 
 # Model investigation
 
