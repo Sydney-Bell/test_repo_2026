@@ -147,6 +147,21 @@ quinn <- read_csv("../data/quinn.csv", trim_ws = TRUE)
 
 # Exploratory data analysis
 
+```{r}
+#| label: label
+#| eval: true
+#| echo: true
+
+quinn |> ggplot(aes(y = RECRUITS, x = SEASON, fill = DENSITY)) +
+  geom_boxplot() 
+
+#appears to be a relationship between mean and variance (lower mean = lower variance)
+
+#don't ever do sqrt transformation, it's sooo hard to back transform
+
+#need to check if it's zero inflated --> there are some in winter
+```
+
 Model formula:
 $$
 \begin{align}
@@ -192,16 +207,233 @@ quinn <- quinn |>
                          levels = c("Spring", "Summer", "Autumn", "Winter")),
                          DENSITY = factor(DENSITY))
 ```
-# Exploratory data analysis
-# Fit the model
 
+# Fit the model
+```{r}
+#| label: define model formula
+#| eval: true
+#| echo: true
+
+quinn_form <- bf(RECRUITS ~ fSEASON*DENSITY, family = poisson(link = 'log'))
+```
+
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+get_prior(quinn_form, data = quinn)
+
+#adding +1 so that we don't have to deal with 0s. Thats also why we use both mean and median and so on
+quinn |> 
+  group_by(fSEASON, DENSITY) |> 
+  summarise(mean = mean(log(RECRUITS+1)),
+            median = median(log(RECRUITS+1)),
+            SD = sd(log(RECRUITS+1)),
+            MAD = mad(log(RECRUITS+1))) 
+
+
+priors <- prior(normal(2.4,0.8), class = 'Intercept') +
+  prior(normal(0,1.3), class = 'b')
+#doesn't need to be exact number, just whatever is close to the mean/median and SD/MAD
+```
 
 # MCMC sampling diagnostics
+```{r}
+#| label: prior only model
+#| eval: true
+#| echo: true
+#| cache: true
+
+#stan uses no u turn sampler (NUTS)
+quinn_brm2 <- brm(quinn_form,
+                 data=quinn,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0, 
+                 seed = 1)
+
+```
+```{r}
+#| label: plot model quinn_brm2
+#| eval: true
+#| echo: true
+
+quinn_brm2 |> 
+  conditional_effects('fSEASON:DENSITY') |> 
+  plot(points = TRUE)
+
+```
+
+```{r}
+#| label: sample from prior and data
+#| eval: true
+#| echo: true
+#| cache: true
+
+quinn_brm3 <- update(quinn_brm2, sample_prior = 'yes', refresh = 0, seed = 1)
+
+```
+
+```{r}
+#| label: plot model quinn_brm3
+#| eval: true
+#| echo: true
+
+quinn_brm3 |> 
+  conditional_effects('fSEASON:DENSITY') |> 
+  plot(points = TRUE)
+
+#now model looks much more refined
+#and looks like data is driving the trend, not priors which is what we want
+```
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+quinn_brm3 |> 
+  SUYR_prior_and_posterior()
+```
 
 # Model validation
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
 
+quinn_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+quinn_brm3$fit |> stan_ac()
+
+quinn_brm3$fit |> stan_rhat()
+
+quinn_brm3$fit |> stan_ess()
+```
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
+
+quinn_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+#our model reconstructs the data okayyy
+```
+
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+quinn.resids <- make_brms_dharma_res(quinn_brm3, integerResponse = TRUE)
+testUniformity(quinn.resids)
+plotResiduals(quinn.resids, quantreg = TRUE)
+testDispersion(quinn.resids)
+
+#to the right = overdispersion
+#to the left = underdispersed
+
+#ours is overdispered, more variability than our model expected
+
+#when you look at species that aggregate, you get things the model can't account for --> you could account for this with an observation level random effect
+#so we use a negative binomial
+```
 
 # Explore negative binomial model
+## because we only have a few 0s
+
+```{r}
+#| label: formula
+#| eval: true
+#| echo: true
+
+quinn_form <- bf(RECRUITS ~ fSEASON*DENSITY, family = negbinomial(link = 'log'))
+```
+
+```{r}
+#| label: add extra prior
+#| eval: true
+#| echo: true
+
+#negbinomial has 2 parameters so we need 2 priors now
+get_prior(quinn_form, data = quinn)
+
+#visualize this
+standist::visualize("inv_gamma(0.4, 0.3)")
+
+#compare with this standard prior for overdispersion
+standist::visualize("inv_gamma(0.4, 0.3)", "gamma(0.01, 0.01")
+#0.01, 0.01 is a wider prior than the other one
+#but our dispersion was about 2.5 so either of these priors would appropriately encompass this
+
+#add this new prior to our OG priors
+priors <- priors + prior(inv_gamma(0.4,0.3), class = "shape")
+```
+
+```{r}
+#| label: prior only model
+#| eval: true
+#| echo: true
+#| cache: true
+
+priors <- prior(normal(2.4,0.8), class = 'Intercept') +
+  prior(normal(0,1.3), class = 'b') + 
+  prior(gamma(0.01,0.01), class = "shape")
+  
+
+#stan uses no u turn sampler (NUTS)
+quinn_brmsNB <- brm(quinn_form,
+                 data=quinn,
+                 prior=priors,
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0, 
+                 seed = 1)
+
+```
+
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
+
+quinn_brmsNB$fit |> stan_trace(inc_warmup = TRUE)
+
+quinn_brmsNB$fit |> stan_ac()
+
+quinn_brmsNB$fit |> stan_rhat()
+
+quinn_brmsNB$fit |> stan_ess()
+```
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+quinn.resids <- make_brms_dharma_res(quinn_brmsNB, integerResponse = TRUE)
+testUniformity(quinn.resids)
+plotResiduals(quinn.resids, quantreg = TRUE)
+testDispersion(quinn.resids)
+
+#instead of AIC, we use looic
+#it only means something if we compare it to another model
+loo(quinn_brmsNB) #298
+loo(quinn_brm3) #338
+#so negative binomial is better
+
+#can also do
+loo_compare(loo(quinn_brmsNB), loo(quinn_brm3)) #Neg binomial is 20x better than brm3 or 40x better on AIC scale
+```
+
 # Partial effects plots
 
 # Model investigation
