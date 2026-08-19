@@ -265,7 +265,7 @@ polis_brm2 <- brm(polis_form,
 
 ```
 ```{r}
-#| label: plot model fert_brm2
+#| label: plot model polis_brm2
 #| eval: true
 #| echo: true
 

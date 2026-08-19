@@ -91,6 +91,7 @@ library(bayestestR)    #for ROPE
 library(easystats)     #for the easystats ecosystem
 library(ggridges)      #for ridge plots
 library(patchwork)     #for multiple plots
+library(ggridges)
 theme_set(theme_grey()) #put the default ggplot theme back
 source("helperFunctions.R")
 ```
@@ -165,25 +166,418 @@ $$
 where $\boldsymbol{\beta}$ is a vector of effects parameters and $\bf{X}$ is a model matrix representing the intercept and treatment contrasts for the effects of Treatment on barnacle recruitment.
 
 # Exploratory data analysis
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
+
+#no assumptions with Poisson but do need to pay attention to how many 0s there are
+
+day |> ggplot(aes(y = BARNACLE, x = TREAT)) +
+  geom_boxplot() +
+  geom_point(color = 'red')
+
+#no zeros
+#nothing stands out as looking "wrong" --> can move ahead
+```
 
 # Fit the model
+```{r}
+#| label: set categorical predictor as factor
+#| eval: true
+#| echo: true
 
+day <- day |> 
+  mutate(TREAT = factor(TREAT))
+```
+
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
+
+day_form <- bf(BARNACLE ~ TREAT, family = poisson(link = 'log'))
+```
+
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+get_prior(day_form, data = day)
+#can set a seperate prior for each beta
+#OR set one for everything
+
+#for Intercept look at the median of ALG1 (since that is what the intercept comes from)
+day |> 
+  group_by(TREAT) |> 
+  summarise(median(log(BARNACLE)), mad(log(BARNACLE))) #need to use log because we have the logit link function for a Poisson distribution (couldn't do this if we had zeros)
+
+#intercept and all betas
+priors <- prior(normal(3.1,0.3), class = 'Intercept') +
+  prior(normal(0,0.4), class = 'b') #keep mean at 0 because we want to let the data decide, variance will be something big enough to include all of the mad() variances
+
+```
 
 # MCMC sampling diagnostics
+```{r}
+#| label: prior only model
+#| eval: true
+#| echo: true
+#| cache: true
 
+#stan uses no u turn sampler (NUTS)
+day_brm2 <- brm(day_form,
+                 data=day,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0, 
+                 seed = 1)
 
+```
+
+```{r}
+#| label: plot model day_brm2
+#| eval: true
+#| echo: true
+
+day_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#larger black dot is estimated mean of posterior
+#error bars are CI lower and upper --> 95% represent TYPICAL recruitment not alllll recruitment
+```
+
+```{r}
+#| label: sample from prior and data
+#| eval: true
+#| echo: true
+#| cache: true
+
+day_brm3 <- update(day_brm2, sample_prior = 'yes', refresh = 0, seed = 1)
+
+```
+```{r}
+#| label: plot model day_brm3
+#| eval: true
+#| echo: true
+
+day_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#now model looks much more refined
+#and looks like data is driving the trend, not priors which is what we want
+```
+
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+day_brm3 |> SUYR_prior_and_posterior()
+
+#proof that priors are influential (thats what we want)
+#this function helps show you what prior is problematic
+
+#there's no way b posterior is the same as the prior, so no way priors are driving the trends
+```
 # Model validation
+```{r}
+#| label: traceplots
+#| eval: true
+#| echo: true
 
+day_brm3$fit |> stan_trace()
 
+day_brm3$fit |> stan_trace(inc_warmup = TRUE)
+```
+
+```{r}
+#| label: autocorrelation plot
+#| eval: true
+#| echo: true
+
+day_brm3$fit |> stan_ac()
+#standard to have a bar at 0
+#at a lag of 1 (x-axis) we don't want to have large autocorrelation --> no bias between draws
+#therefore, thinning was adequate
+```
+
+```{r}
+#| label: convergence
+#| eval: true
+#| echo: true
+
+#how well did chains converge
+day_brm3$fit |> stan_rhat()
+#want values <1.01
+#if they are above 1.01 then the chains were different from each other
+      # ^ might need to add more iterations or check priors 
+```
+
+```{r}
+#| label: effective sample size
+#| eval: true
+#| echo: true
+
+day_brm3$fit |> stan_ess()
+
+#uses no u turn sampler (NUTS) --> not your actual data
+#tells us how many draws were effective out of all of them
+#want this to be >0.5, and closer to 1 the better
+#its okay if they are <0.5, but this means the model isn't efficient and the priors were probably too large,
+#causing the sampler to go too far
+```
+
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
+
+day_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+#our model reconstructs the data quite well
+```
+
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+preds <- day_brm3 |> posterior_predict(ndraws=250, summary=FALSE)
+day.resids <- createDHARMa(simulatedResponse = t(preds),
+                            observedResponse = day$BARNACLE,
+                            fittedPredictedResponse = apply(preds, 2, median),
+                            integerResponse = TRUE)
+day.resids |> plot()
+
+#QQ Plot: plots quantiles (median, upper, lower, etc)
+#straight line applies that residuals follow nominated distribution (normal in this case)
+#you want straight line
+#KS: Smirnoff test for conformity to distribution --> if it was significant, maybe pay attention to it and see if you can change anything --> but don't blindly accept this
+#Dispersion: ratio of variance to the mean --> for normal distribution we want close to 1
+#Outlier test: if in red, check and see if it really is a problem
+
+#residual plot: dont want any patterns (fan shape = unequal variances)
+
+#need to test Poisson assumption that dispersion = 1
+testDispersion(day.resids)
+#we want red line to be near the peak of the simulated data (histogram peak) --> looks good!
+#to the right = overdispersion
+#to the left = underdispersed
+```
 # Partial effects plots
+```{r}
+#| label: partial effects plots
+#| eval: true
+#| echo: true
 
+day_brm3 |> conditional_effects() |> plot(points = TRUE)
+```
 
 # Model investigation
+```{r}
+#| label: simple summary
+#| eval: true
+#| echo: true
 
+#this is on log scale so not helpful
+day_brm3 |> summary()
+
+#need to exp()
+exp(3.08) #this is the mean # of new recruits in ALG1
+
+#diff between ALG1 and ALG2
+exp(0.26) #but when you exp() it becomes multiplicative not additive so its 1.3 times greater than 21.8
+exp(3.08 + 0.26) #this gives you the mean of ALG2
+(1.29 - 1) * 100 #recruitment is 29% higher in the ALG2 group than the ALG1 group
+
+#diff between ALG1 and NB
+exp(-0.34)
+(0.71 - 1) * 100 #29% decline
+
+#PROBABILITY SCALE:
+# >0.85 = evidence for that is weak
+# <0.85 = no evidence at all
+# >0.9 = there is evidence
+# >0.95 = the evidence is strong
+```
+
+```{r}
+#| label: table on log odds scale
+#| eval: true
+#| echo: true
+
+day_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than ALG1
+                  Pg = ~mean(.x > 1)) #greater than ALG1
+
+#summary gives mean BUT this gives us the MEDIAN which is more robust
+
+#our table is expentiated and exp(0) = 1 so that's why we use 1 in the calculation of P
+
+# very strong evidence for recruitment being higher in ALG2 than ALG1 because lower and upper don't overlap with 1 (look at Pg column, Pg = 0.979)
+# very strong evidence for recruitment being lower in NB than ALG1 because lower and upper don't overlap with 1 (Pl = 0.99)
+# very strong evidence for recruitment being lower in S than ALG1 because lower and upper don't overlap with 1 (Pl = 1.00)
+
+day_brm3 |> bayes_R2(summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 66% of variation in recruits can be explained by treatment
+```
 
 # Further investigations
 
-# Summary Figure
+```{r}
+#| label: pairwise tests between treatments
+#| eval: true
+#| echo: true
 
+#don't need to create newdata for categorical data
+day_table <- day_brm3 |> 
+  emmeans(~TREAT, type = "response") |> 
+  pairs(reverse = TRUE) |> 
+  tidy_draws() |> 
+  exp() |>  #need to undo logit scale
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than ALG1
+                  Pg = ~mean(.x > 1)) #greater than ALG1
+
+#no evidence of a difference in recruitment between NB and S
+```
+
+# Summary Figure
+```{r}
+#| label: catepillar plot
+#| eval: true
+#| echo: true
+
+#y = variable, x = median
+#linerange for error bars
+
+catepillar_plot <- day_table |> 
+  ggplot(aes(y = variable, x = median)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_pointrange(aes(xmin = lower, xmax = upper)) +
+  scale_x_continuous("Effect size (fold scale)", trans = scales::log2_trans(),
+                     breaks = c(0.25, 0.5, 0.75, 1, 1.5))
+
+#using a log2 scale to make the scale more intuitive than a linear scale
+#2 and 0.5 would be the same distance away from 1. Doubling is the reverse of halving
+log2(2) #1
+log2(0.5) #-1
+```
+
+```{r}
+#| label: ridge plots
+#| eval: true
+#| echo: true
+
+#first need to create a table with posterior draws/distribution
+day_post <- day_brm3 |> 
+  emmeans(~TREAT) |> 
+  pairs(reverse = TRUE) |> 
+  gather_emmeans_draws() |> 
+  mutate(pred = exp(.value))
+
+#now ridge plots
+day_post |> 
+  ggplot(aes(x = pred)) +
+  geom_density_ridges_gradient(aes(y = contrast,
+                                   fill = factor(stat(x < 1.1 & x > 0.9))), #ROPE: region of practical equivalence. 10% is standard but can change it and justify why
+                               alpha = 0.4, colour = 'white',
+                               quantile_lines = TRUE,
+                               quantiles = c(0.025, 0.975),
+                               show.legend = FALSE) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_continuous("Effect size (fold scale)", trans = scales::log2_trans(),
+                     breaks = c(0.25, 0.5, 0.75, 1, 1.5))
+
+#if majority of distribution is in ROPE, there is evidence of no effect OR you need more power (more samples)
+
+#prettier plot
+ridge_plot <- day_post |> 
+  ggplot(aes(x = pred)) +
+  geom_density_ridges_gradient(aes(y = contrast,
+                                   fill = factor(stat(x < 1.1 & x > 0.9))),
+                               alpha = 0.4, colour = 'white',
+                               quantile_lines = TRUE,
+                               quantiles = c(0.025, 0.975),
+                               show.legend = FALSE) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_continuous("Effect size (fold scale)", trans = scales::log2_trans(),
+                     breaks = c(0.25, 0.5, 0.75, 1, 1.5)) +
+  scale_y_discrete("") +
+  scale_fill_viridis_d() +
+  theme_classic()
+
+catepillar_plot / ridge_plot
+```
+
+```{r}
+#| label: contrasts
+#| eval: true
+#| echo: true
+
+cmat <- cbind('Alg2vsAlg1' = c(-1,1,0,0),
+              'AlgvsBare' = c(0.5,0.5,-0.5,-0.5),
+              'AlgvsNB' = c(0.5,0.5,-1,0))
+cmat
+
+day_brm3 |> emmeans(~TREAT, type = "response") |> 
+  contrast(method = list(TREAT = cmat)) |> 
+  tidy_draws() |> 
+  exp() |>  #need to undo logit scale
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than ALG1
+                  Pg = ~mean(.x > 1)) #greater than ALG1
+
+#69% more recruitment on the algae surfaces vs the bare surfaces
+#60% more recruitment on the algae surfaces vs the natural bare
+
+#now to get absolute change
+#the order of the backtransformation (regrid or exp) in relation to contrast matters
+#back transformation after contrast is fractional scale
+#back transformation before contrast is absolute scale
+day_abs <- day_brm3 |> 
+  emmeans(~TREAT) |> 
+  regrid() |> 
+  contrast(method = list(TREAT = cmat)) |> 
+  tidy_draws() |> 
+  summarise_draws(median, HDInterval::hdi, Pl = ~mean(.x < 0), Pg = ~mean(.x >0))
+```
+
+# Final figure
+```{r}
+#| label: summary figure
+#| eval: true
+#| echo: true
+
+day_em2 <- day_brm3 |> 
+  emmeans(~TREAT, type = "response") |>
+  as.data.frame()
+  
+day_plot <- day_em2 |> 
+  ggplot(aes(y = rate, x = TREAT)) +
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD))
+
+day_plot + ridge_plot & theme_classic() #apply same theme to both plots
+```
 
 # References

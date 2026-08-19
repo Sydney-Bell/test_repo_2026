@@ -416,7 +416,7 @@ make_brms_dharma_res <- function(brms_model, seed = 10, ...) {
     ##     mean)
     DHARMa::createDHARMa(
                 simulatedResponse = brms_sims,
-                observedResponse = response,
+                observedResponse = as.vector(response),
                 fittedPredictedResponse = fitted_median_brms,
                 ...
             )
