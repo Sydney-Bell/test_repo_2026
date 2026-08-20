@@ -120,11 +120,11 @@ treatment.
 LEAF   TREAT    NUMBER
 ------ -------- --------
 1      Strong   35.898
-1      Week     25.02
+1      Weak     25.02
 2      Strong   34.118
-2      Week     23.167
+2      Weak     23.167
 3      Strong   35.702
-3      Week     24.122
+3      Weak     24.122
 \...   \...     \...
 
 : Format of tobacco.csv data files {#tbl-tobacco .table-condensed}
@@ -150,11 +150,76 @@ LEAF   TREAT    NUMBER
 ```{r}
 #| label: readData
 tobacco <- read_csv("../data/tobacco.csv", trim_ws = TRUE)
+
+head(tobacco)
+#LEAF is random effect (random effect is always categorical)
+#NUMBER is response
+#TREATMENT is fixed effect
+
+tobacco <- tobacco |> 
+  mutate(LEAF = factor(LEAF),
+         TREATMENT = factor(TREATMENT))
+
+#NUMBER is averaged so we are looking at a normal distribution
 ```
 
 
 
 # Exploratory data analysis
+
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
+
+tobacco |> ggplot(aes(y = NUMBER, x = TREATMENT)) +
+  geom_boxplot() 
+
+#normality = okay
+#variance = okay
+```
+
+```{r}
+#| label: pick-up-sticks plot
+#| eval: true
+#| echo: true
+
+ggplot(tobacco, aes(y = NUMBER, x = TREATMENT, group = LEAF)) +
+  geom_point() +
+  geom_line(aes(x = as.numeric(TREATMENT))) #can only draw lines between numbers
+
+```
+
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
+
+#ONLY bother fitting a random slopes if TREATMENT is within the block and if there are different slopes visible in above graph
+
+tobacco_form <- bf(NUMBER ~ (1|LEAF) + TREATMENT, #1 = intercept and | = conditional on (Intercept is conditional on the LEAF)
+              family = gaussian()
+              )
+
+```
+
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+get_prior(tobacco_form, data = tobacco)
+#need priors for b, intercept (average of individual intercepts for first level of TREATMENT), sigma, and sd (variation in individual LEAF intercepts)
+
+tobacco |> 
+  group_by(TREATMENT) |> 
+  summarise(median(NUMBER), mad(NUMBER))
+
+priors <- prior(normal(35, 2.7), class = 'Intercept') + #for SD just round the first one
+  prior(normal(0, 10), class = 'b') + #need to account for differences between medians so maybe go with 10
+  prior(student_t(3, 0, 3.5), class='sigma') +
+  prior(student_t(3, 0, 3.5), class='sd')
+```
 
 ::: {.columns}
 :::: {.column width="50%"}
@@ -227,14 +292,174 @@ where $\Sigma$ is a covariance matrix.
 
 # Fit the model
 
+```{r}
+#| label: fit model - priors only
+#| eval: true
+#| echo: true
+#| cache: true
+
+tobacco_brm2 <- brm(tobacco_form,
+                 data = tobacco,
+                 prior = priors,
+                 sample_prior = 'only',
+                 iter = 5000,
+                 warmup = 1000,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1)
+
+```
+
+```{r}
+#| label: conditional effect plot
+#| eval: true
+#| echo: true
+
+tobacco_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+
+#the priors must be very wide
+```
+
+```{r}
+#| label: model with priors and data
+#| eval: true
+#| echo: true
+
+tobacco_brm3 <- update(tobacco_brm2, sample_prior = 'yes', refresh = 0)
+
+#random effects usually cause sharp features in the posterior and makes divergent transitions (divergence)
+#BUT you can control for this by telling the model to learn more thoroughly the physics of the posterior
+
+tobacco_brm3 <- update(tobacco_brm2,
+                       sample_prior = 'yes',
+                       control = list(adapt_delta = 0.99),
+                       refresh = 0)
+
+tobacco_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+
+#priors are clearly not driving the posterior
+```
 
 # MCMC sampling diagnostics
 
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+tobacco_brm3 |> 
+  SUYR_prior_and_posterior()
+
+```
 
 # Partial effects plots
 
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
+
+tobacco_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+tobacco_brm3$fit |> stan_ac() #pay the most attention to sigma
+
+tobacco_brm3$fit |> stan_rhat()
+
+tobacco_brm3$fit |> stan_ess()
+```
+
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
+
+tobacco_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+```
+
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+tobacco.resids <- make_brms_dharma_res(tobacco_brm3, integerResponse = TRUE)
+testUniformity(tobacco.resids)
+plotResiduals(tobacco.resids, quantreg = FALSE) #because there are so few points we add FALSE
+testDispersion(tobacco.resids)
+```
 
 # Model investigation
+
+```{r}
+#| label: summary table
+#| eval: true
+#| echo: true
+
+#absolute scale
+tobacco_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$|^sd_.*")) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 0), #less than 
+                  Pg = ~mean(.x > 0)) #greater than
+
+#Intercept: Average number of lesions in the strong treatment was 36.
+#Weak lesion has 8 less lesions (strong evidence).
+#sigma = unexplained variance (4.2 units of variation)
+#sd is how variable the different leaves are (3 units)
+
+#TREATMENT and LEAF scale have similar levels of variance (sd_LEAF vs sigma)
+```
+
+```{r}
+#| label: fractional scale table
+#| eval: true
+#| echo: true
+
+#transformed to logs, substracted the two, and then back transformed to get a percentage difference
+tobacco_brm3 |> 
+  emmeans(~TREATMENT) |> 
+  regrid(transform = "log") |> 
+  pairs() |> 
+  regrid()
+
+#The strong treatment produces 27% more lesions than the weak treatment.
+
+```
+
+
+```{r}
+#| label: R2
+#| eval: true
+#| echo: true
+
+tobacco_brm3 |> 
+  bayes_R2(re.form = NA, summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 37% of variation in lesions can be explained by treatment (fixed effects only)
+
+#conditional R2 - variation explained by fixed and random effects
+tobacco_brm3 |> 
+  bayes_R2(re.form = ~(1|LEAF), summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 60% of variation in lesions can be explained by treatment (fixed effects AND random effects) --> total amount explained
+
+#40% of variation unexplained
+```
 
 # Further investigations
 
