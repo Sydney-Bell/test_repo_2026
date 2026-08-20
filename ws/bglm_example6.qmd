@@ -377,7 +377,7 @@ priors <- priors + prior(inv_gamma(0.4,0.3), class = "shape")
 ```
 
 ```{r}
-#| label: prior only model
+#| label: prior only model again
 #| eval: true
 #| echo: true
 #| cache: true
@@ -402,7 +402,7 @@ quinn_brmsNB <- brm(quinn_form,
 ```
 
 ```{r}
-#| label: model diagnostics
+#| label: model diagnostics again
 #| eval: true
 #| echo: true
 
@@ -415,7 +415,7 @@ quinn_brmsNB$fit |> stan_rhat()
 quinn_brmsNB$fit |> stan_ess()
 ```
 ```{r}
-#| label: simulate residuals
+#| label: simulate residuals again
 #| eval: true
 #| echo: true
 
@@ -431,17 +431,128 @@ loo(quinn_brm3) #338
 #so negative binomial is better
 
 #can also do
-loo_compare(loo(quinn_brmsNB), loo(quinn_brm3)) #Neg binomial is 20x better than brm3 or 40x better on AIC scale
+loo_compare(loo(quinn_brmsNB), loo(quinn_brm3)) 
+#Neg binomial is 20x better than brm3 or 40x better on AIC scale
 ```
 
 # Partial effects plots
 
+```{r}
+#| label: plot model quinn_brmsNB
+#| eval: true
+#| echo: true
+
+quinn_brmsNB |> 
+  conditional_effects('fSEASON:DENSITY') |> 
+  plot(points = TRUE)
+
+#now model looks much more refined
+#and looks like data is driving the trend, not priors which is what we want
+```
+
 # Model investigation
+
+```{r}
+#| label: simple summary
+#| eval: true
+#| echo: true
+
+#on link/log scale we always look at if 95% CIs cross over 0 --> if they don't, then strong evidence
+#if we back transform then we look if they cross 1
+#at this point, all we can say there is strong evidence (cant say anything else until we do probabilities)
+
+
+#remember this is on the log scale
+quinn_brmsNB |> summary()
+#look at interaction components first
+#also gives us true dispersion factor (was around 6, showing that it was overdispersed)
+
+#intercept represent the first combo: spring+high
+exp(2.39) # average number of recruits in spring+high
+
+#second line is fSEASONSummer High vs fSEASONSPRING High
+exp(1.47) #4.3 times more recruits, strong evidence
+(4.34 - 1) * 100 #334% increase in recruitment between spring and summer for the high density
+
+exp(2.39 + 1.47) #absolute value for mean of summer high
+
+#in summer for low density, its only half of what it would be expected to be if it was an additive model with no interactions (thats why we get ~0.5)
+exp(-0.72)
+```
+
+```{r}
+#| label: make summary table with more intuitive scale
+#| eval: true
+#| echo: true
+
+quinn_brmsNB |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
+
+#conclusion so far is that there are interactions
+```
 
 # Further investigations
 
-# Summary figures
+```{r}
+#| label: pairwise tests between treatments
+#| eval: true
+#| echo: true
 
+#we are now cutting the pizza a different way to get answers for separate seasons
+
+#could look at the effect of each density per season OR each season per density
+# | means "conditional on" so compare high and low density for each season
+quinn_table <- quinn_brmsNB |> 
+  emmeans(~DENSITY | fSEASON, type = "response") |> #response back transforms
+  pairs(reverse = TRUE) |> 
+  tidy_draws() |> 
+  exp() |>  #need to undo logit scale because tidy_draws doesn't recognize response from above
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than
+                  Pg = ~mean(.x > 1), #greater than
+                  ROPE = ~mean(.x > 0.9 & .x < 1.1)) # whats the probability that all the data is within 10% of 1
+
+# .x is a temporary name for calculations
+
+#no evidence of a difference in recruitment between high and low density in Spring and Autumn
+#Doubled recruitment in Summer and Winter
+```
+
+```{r}
+#| label: absolute scale
+#| eval: true
+#| echo: true
+
+
+#now to get absolute change
+#the order of the backtransformation (regrid or exp) in relation to contrast matters
+#back transformation after contrast is fractional scale
+#back transformation before contrast is absolute scale
+
+quinn_abs <- quinn_brmsNB |> 
+  emmeans(~DENSITY | fSEASON, type = "response") |> #response back transforms
+  regrid() |> 
+  pairs() |> 
+  tidy_draws() |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 0), #less than
+                  Pg = ~mean(.x > 0) #greater than
+                  ) 
+
+#bulk of recruitment is occurring in summer
+```
+
+# Summary figures
 
 
 # References

@@ -131,11 +131,39 @@ predictors on the abundance of forest birds.
 
 ```{r readData, results='markdown', eval=TRUE}
 loyn <- read_csv('../data/loyn.csv', trim_ws=TRUE)
+
+head(loyn)
+#going to treat GRAZE as a categorical factor so we name it fGRAZE, keeping GRAZE in the dataset
+loyn <- loyn |> 
+  mutate(fGRAZE = factor(GRAZE))
 ```
 
-
-
 # Exploratory data analysis
+
+```{r}
+#| label: check assuemptions for normal model
+#| eval: true
+#| echo: true
+
+#put response first
+scatterplotMatrix(~ABUND+DIST+LDIST+AREA+fGRAZE+ALT+YR.ISOL, data = loyn,
+                  diagonal = list(method = 'boxplot'))
+#diagonal has distribution for each
+#abundance is on the top row
+#the top row, second column is a y-axis of ABUND and x-axis of DIST
+
+#if predictor is skewed, some of the other assumptions might not be met
+#predictors can be transformed and messed with but don't want to do this for the response variable
+#if transformations don't improve things, then leave the predictor alone (ex. YR.ISOL)
+
+#need to address skewed DIST, LDIST, and AREA first
+#transform with log
+scatterplotMatrix(~ABUND+log(DIST)+log(LDIST)+log(AREA)+fGRAZE+ALT+YR.ISOL, data = loyn,
+                  diagonal = list(method = 'boxplot'))
+#box plots look much better!
+#we are just looking for anything OBVIOUS
+#seems like DIST and LDIST are correlated so might need to drop one of them
+```
 
 Model formula:
 $$
@@ -152,26 +180,366 @@ where $\boldsymbol{\beta}$ is a vector of effects parameters and $\bf{X}$ is a m
 the scaled versions of distance (ln), distance to the nearest large patch (ln), patch area (ln), grazing intensity, year of isolation and
 altitude on the abundance of forest birds.
 
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
+
+#a normal model gives negative bird predictions so need to try something else like a log normal distribution
+#centering and scaling continuous predictors
+loyn_form <- bf(ABUND ~ scale(log(LDIST)) +
+                  scale(log(AREA)) +
+                  fGRAZE +
+                  scale(ALT) +
+                  scale(YR.ISOL),
+                family = gaussian(link = 'log')
+                )
+
+```
+
+
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+loyn |> group_by(fGRAZE) |> 
+  summarise(median(log(ABUND)),
+            mad(log(ABUND)))
+
+#intercept here is the avg number birds when all predictors are zero and graze = 1.
+#it includes a mix of continuous and categorical predictors
+
+get_prior(loyn_form, data = loyn)
+
+priors <- prior(normal(3.4,0.1), class = 'Intercept') + #for SD just round the first one
+  prior(normal(0,2), class = 'b') + #need to account for differences between 3.38 and 1.34 so maybe go with 2 
+  prior(student_t(3, 0, 1.1), class="sigma")
+
+
+```
+
 # Fit the model
 
+```{r}
+#| label: fit model
+#| eval: true
+#| echo: true
+#| cache: true
 
+loyn_brm2 <- brm(loyn_form,
+                 data = loyn,
+                 prior = priors,
+                 sample_prior = 'only',
+                 iter = 5000,
+                 warmup = 1000,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1)
+
+```
+
+```{r}
+#| label: conditional effect plot
+#| eval: true
+#| echo: true
+
+loyn_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+
+#the priors must be very wide
+```
+
+```{r}
+#| label: model with priors and data
+#| eval: true
+#| echo: true
+
+loyn_brm3 <- update(loyn_brm2, sample_prior = 'yes', refresh = 0)
+
+loyn_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+
+#fGRAZE 5 looks weird, the mean is way up high compared to the points
+#could be sigma wasn't wide enough or the variance for slope of fGRAZE is too small
+
+```
+
+```{r}
+#| label: try adjusting slope prior for fGRAZE
+#| eval: true
+#| echo: true
+
+get_prior(loyn_form, data = loyn)
+
+priors <- prior(normal(3.4,0.1), class = 'Intercept') + 
+  prior(normal(0,2), class = 'b') + 
+  prior(normal(0, 10), class = 'b', coef = "fGRAZE5") +
+  prior(student_t(3, 0, 1.1), class="sigma")
+
+loyn_brm4 <- brm(loyn_form,
+                 data = loyn,
+                 prior = priors,
+                 sample_prior = 'yes',
+                 iter = 5000,
+                 warmup = 1000,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1)
+
+#these plots show y relative to x when all other predictors are accounted for
+loyn_brm4 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+
+#fGRAZE5 still looks the same :(
+#so shrinkage is real and not an artifact of the model/priors
+
+```
 
 # MCMC sampling diagnostics
 
+```{r}
+#| label: examine all priors and posteriors
+#| eval: true
+#| echo: true
+
+loyn_brm3 |> 
+  SUYR_prior_and_posterior()
+
+#prior for b was already so wide, making it larger in brm4 wouldn't have helped
+
+#main thing to look for, you want posterior and prior to be different from each other
+```
+
 # Model validation
 
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
 
+loyn_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+loyn_brm3$fit |> stan_ac()
+
+loyn_brm3$fit |> stan_rhat()
+
+loyn_brm3$fit |> stan_ess()
+```
+
+```{r}
+#| label: posterior probs density overlay
+#| eval: true
+#| echo: true
+
+loyn_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+#dark line is actual distribution of our data
+#our model reconstructs the data okayyy
+```
+
+```{r}
+#| label: simulate residuals
+#| eval: true
+#| echo: true
+
+loyn.resids <- make_brms_dharma_res(loyn_brm3, integerResponse = TRUE)
+testUniformity(loyn.resids)
+plotResiduals(loyn.resids)
+testDispersion(loyn.resids)
+
+#to the right = overdispersion
+#to the left = underdispersed
+
+#model is being drama queen...its really all good
+```
 
 # Partial effects plots
 
+```{r}
+#| label: conditional effects plot again
+#| eval: true
+#| echo: true
+
+loyn_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
 
 # Model investigation
+```{r}
+#| label: make summary table
+#| eval: true
+#| echo: true
 
+loyn_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$")) |> 
+  mutate(across(matches("^b_.*"), exp)) |> #just exp b's, doesn't make sense to do this for sigma
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
 
+#23 is the expected number of birds in GRAZE1 when all other continuous variables are at their average (0) (aka holding all other predictors constant)
+
+#for every one unit change in scalelogDIST the expected number of birds increases by 4% (median = 1.038)
+
+#for every one unit change in scalelogAREA, the expected number of birds increases by 21% (median = 1.205). And there was strong evidence of a positive change.
+
+#for medians below 1, you need to convert scale for comparisons (invert negatives)
+#for GRAZE5
+1/0.465 # = 2.15
+
+#GRAZE5 has the biggest impact on bird abundance followed by AREA
+```
 
 # Further analyses
 
+```{r}
+#| label: habitat model
+#| eval: true
+#| echo: true
 
+#area, grazing, and interaction
+loyn_habitat <- update(loyn_brm3, .~scale(log(AREA)) *
+                  fGRAZE, refresh = 0)
+
+```
+
+```{r}
+#| label: connectivity model
+#| eval: true
+#| echo: true
+
+#LDIST
+loyn_connect <- update(loyn_brm3, .~scale(log(LDIST)), refresh = 0)
+
+```
+
+```{r}
+#| label: climate model
+#| eval: true
+#| echo: true
+
+#ALT
+loyn_climate <- update(loyn_brm3, .~scale(ALT), refresh = 0)
+
+```
+
+```{r}
+#| label: NULL model
+#| eval: true
+#| echo: true
+
+#to assess the other models against
+loyn_null <- update(loyn_brm3, .~1, refresh = 0) #1 signifies an intercept
+
+```
+
+```{r}
+#| label: compare models
+#| eval: true
+#| echo: true
+
+loo_compare(loo(loyn_habitat), loo(loyn_null)) 
+#habitat is 30x better than null. Is useful. Has an impact on bird abundance.
+
+loo_compare(loo(loyn_connect), loo(loyn_null)) 
+#null and connect are considered the same. The SE is large enough to encompass 0
+
+loo_compare(loo(loyn_climate), loo(loyn_null))
+#climate is 3.5x better than null. Is useful. Has an impact on bird abundance.
+```
+
+```{r}
+#| label: plots
+#| eval: true
+#| echo: true
+
+loyn_habitat |> 
+  conditional_effects("AREA:fGRAZE") |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10() &
+  scale_x_log10() &
+  scale_fill_viridis_d() &
+  scale_color_viridis_d()
+
+```
+
+```{r}
+#| label: habitat table
+#| eval: true
+#| echo: true
+
+#on fractional scale
+loyn_habitat |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$")) |> 
+  mutate(across(matches("^b_.*"), exp)) |> #just exp b's, doesn't make sense to do this for sigma
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
+
+#Intercept: the expected average abundance of birds is 26.4, in GRAZE1 when AREA = 0 (at the average AREA)
+
+#GRAZE2: 15% lower abundance in GRAZE2 than GRAZE1 (1-0.865) at the average AREA
+
+#for every unit change in AREA, bird abundance increases by 10%
+
+#slopes are not equal for every GRAZE category. b_scalelogAREA:fGRAZE2 is 23% higher, b_scalelogAREA:fGRAZE3 is 27% higher, and so on. So ABUNDANCE depends on AREA and GRAZING
+```
+
+```{r}
+#| label: label
+#| eval: true
+#| echo: true
+
+newdata <- with(loyn, data.frame(AREA = c(min(AREA), mean(AREA), max(AREA))))
+
+loyn_table <- loyn_habitat |> 
+  emmeans(~fGRAZE | AREA, at = newdata, type = "response") |> #response back transforms
+  pairs() |> 
+  tidy_draws() |> 
+  exp() |>  #need to undo logit scale because tidy_draws doesn't recognize response from above
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than
+                  Pg = ~mean(.x > 1), #greater than
+                  ROPE = ~mean(.x > 0.9 & .x < 1.1)) # whats the probability that all the data is within 10% of 1
+
+```
+
+```{r}
+#| label: compare slopes of each GRAZE
+#| eval: true
+#| echo: true
+
+loyn_habitat |> 
+  emtrends(~fGRAZE, var = "log(AREA)") |> 
+  pairs()
+
+#ones that don't include 0 are likely significant
+```
 
 # Summary figure
 
