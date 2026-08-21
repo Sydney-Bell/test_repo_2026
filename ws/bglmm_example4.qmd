@@ -77,7 +77,7 @@ Load the necessary libraries
 library(tidyverse) #for data wrangling
 library(car)       #for regression diagnostics
 library(broom)     #for tidy output
-library(ggfortify) #for model diagnostics
+#library(ggfortify) #for model diagnostics
 library(knitr)     #for kable
 library(emmeans)   #for estimating marginal means
 library(MASS)      #for glm.nb
@@ -124,10 +124,36 @@ symbiont type (fixed effect) are nested.
 
 ```{r readData, results='markdown', eval=TRUE}
 mckeon <- read_csv("../data/mckeon.csv", trim_ws = TRUE)
+
+head(mckeon)
+#block is random effect
+#symbint is within block (random slopes could be an option)
+#predation is response (binary so we use Bernouli with logit link function)
+
+#set factor levels and make the control (none) first
+mckeon <- mckeon |> 
+  mutate(BLOCK = factor(BLOCK),
+         SYMBIONT = factor(SYMBIONT, levels = c('none', 'crabs', 'shrimp', 'both')))
 ```
 
-
 # Exploratory data analysis
+
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+#symbiont x-axis
+#predation y-axis
+#facet by blocks
+
+mckeon |> 
+  ggplot(aes(y = PREDATION, x = SYMBIONT)) +
+  geom_point(position = position_jitter(width = 0.2, height = 0), shape = 21) +
+  facet_wrap(~BLOCK)
+  
+#might want to consider random slope model because the response is different for different corals
+```
 
 ::: {.columns}
 :::: {.column width="50%"}
@@ -170,9 +196,95 @@ $\bf{Z}$ represents a cell means model matrix for the random intercepts associat
 
 # Fit the model
 
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
 
+mckeon_form <- bf(PREDATION ~ (1|BLOCK) + SYMBIONT, 
+                  family = bernoulli(link = "logit"))
+
+```
+
+```{r}
+#| label: get priors
+#| eval: true
+#| echo: true
+
+get_prior(mckeon_form, data = mckeon)
+
+priors <- prior(normal(0, 2), class = 'Intercept') + #predation for "none" group
+  prior(normal(0, 5), class = 'b') + #on logit scale you have a range of -3 to 3 ALWYAS, the mean is 0, and variance you need to be able to move quite a way so needs to be like 3-5
+  prior(student_t(3, 0, 2), class='sd') #how variable is the "none" group across blocks?
+```
+
+```{r}
+#| label: fit model
+#| eval: true
+#| echo: true
+
+mckeon_brm2 <- brm(mckeon_form,
+                 data=mckeon,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+```
+
+```{r}
+#| label: fit model with priors and data
+#| eval: true
+#| echo: true
+
+mckeon_brm3 <- update(mckeon_brm2, sample_prior = 'yes',
+                      refresh = 0)
+
+```
+
+```{r}
+#| label: conditional effects
+#| eval: true
+#| echo: true
+
+mckeon_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+#need to remember these are distributions!!! So mass is not equally distributed along the vertical lines, it is denser in the center by the mean
+```
 
 # MCMC sampling diagnostics
+
+```{r}
+#| label: model diagnostics again
+#| eval: true
+#| echo: true
+
+mckeon_brm3 |> 
+  SUYR_prior_and_posterior()
+
+mckeon_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+mckeon_brm3$fit |> stan_ac()
+
+mckeon_brm3$fit |> stan_rhat()
+
+mckeon_brm3$fit |> stan_ess() #ESS is low
+
+mckeon_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+mckeon.resids <- make_brms_dharma_res(mckeon_brm3, integerResponse = TRUE)
+testUniformity(mckeon.resids)
+plotResiduals(mckeon.resids, quantreg = FALSE)
+testDispersion(mckeon.resids)
+```
+
 
 # Model validation
 ::: {.panel-tabset}
@@ -230,13 +342,200 @@ We need to supply:
 ::::
 :::
 <!-- END_PRIVATE-->
-# Partial effects plots
 
 
 # Model investigation
 
+```{r}
+#| label: make table
+#| eval: true
+#| echo: true
+
+#wanted b_ exponentiated to be on log odds scale, and wanted intercept to be on both probability scale (intercept) and log odds scale (b_Intercept)
+mckeon_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sd_.*")) |> 
+  mutate(intercept = b_Intercept) |> 
+  mutate(across(matches("^b_.*"), exp), intercept = plogis(intercept)) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
+
+#b_Intercept: The odds of predation are 60x higher than not being predated on in the group with no symbionts. The probability (intercept) of this predation is 98%
+
+#CRABS
+(0.04-1) #odds of being predated on when crabs are present declines by 96% (strong evidence)
+60.6 * 0.0396 #odds of being predated on when crabs are present = 2.5
+
+#SHRIMP
+(0.02-1) #odds of being predated on when shrimp are present declines by 98% (strong evidence)
+60.6 * 0.022 #odds of being predated on when shrimp are present = 1.3
+
+#BOTH
+(0.007-1) #odds of being predated on when both are present declines by 99% (strong evidence)
+60.6 * 0.007 #odds of being predated on when both are present = 0.4
+
+#mean of each group
+mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> 
+  regrid()
+```
 
 # Further analyses
 
+```{r}
+#| label: contrasts between treatments
+#| eval: true
+#| echo: true
+
+cmat <- cbind('crab vs shrimp' = c(0, 1, -1, 0),
+              'borth vs one' = c(0, -0.5, -0.5, 1),
+              'any vs none' = c(-1, 1/3, 1/3, 1/3))
+cmat
+
+mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> 
+  contrast(method = list(SYMBIONT = cmat)) |> 
+  tidy_draws() |> 
+  exp() |>  #need to undo logit scale
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1), #less than ALG1
+                  Pg = ~mean(.x > 1)) #greater than ALG1
+
+#Crab vs shrimp: no strong effect. They are similar.
+#Both vs one: strong evidence. Odds decline when you have both.
+#any vs none: very strong evidence. Odds of predation decline with any symbiont.
+
+#median > 1, means group 1 prob is greater than group 2
+#median < 1, means group 1 prob is less than group 2
+
+#now to get absolute change (percentage)
+#the order of the backtransformation (regrid or exp) in relation to contrast matters
+#back transformation after contrast is fractional scale
+#back transformation before contrast is absolute scale
+mckeon_abs <- mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> 
+  regrid() |> 
+  contrast(method = list(SYMBIONT = cmat)) |> 
+  tidy_draws() |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 0), #less than ALG1
+                  Pg = ~mean(.x > 0)) #greater than ALG1
+
+mckeon_abs
+
+#contrast SYMBIONT.crab vs shrimp: probability went up 9 units
+#contrast SYMBIONT.borth vs one: probability went down 26 units
+#contrast SYMBIONT.any vs none: probability went down 44 units
+```
+
+# Further Investigations
+## Fit the random intercept and random slope model
+
+```{r}
+#| label: random intercept and slope formula
+#| eval: true
+#| echo: true
+
+#1 represents intercept, would usually be (1 + TREATMENT|LEAF)
+#TREATMENT|LEAF is a slope for TREATMENT
+#its saying intercept and slope are conditional on LEAF (because in the plot we saw different slopes and intercepts for different leaves)
+mckeon_form <- bf(PREDATION ~ (SYMBIONT|BLOCK) + SYMBIONT, 
+                   family = bernoulli(link = 'logit'))
+
+```
+
+```{r}
+#| label: get priors 2
+#| eval: true
+#| echo: true
+
+get_prior(mckeon_form, data = mckeon)
+#need a new prior for "cor" --> correlation between intercept and slope
+#but its very simple, the default prior is the only sensible prior (lkj(1))
+
+priors <- priors +
+  prior(lkj_corr_cholesky(1), class='cor')
+
+```
+
+```{r}
+#| label: model with priors and data 2
+#| eval: true
+#| echo: true
+
+mckeon_random <- brm(mckeon_form,
+                 data = mckeon,
+                 prior = priors,
+                 sample_prior = 'yes',
+                 iter = 5000,
+                 warmup = 1000,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+#if you get divergence even after adjusting the delta, then increase warmup
+#want divergent transitions < 10
+
+```
+
+```{r}
+#| label: compare models 2
+#| eval: true
+#| echo: true
+
+loo_compare(loo(mckeon_random), loo(mckeon_brm3)) 
+#mckeon_random is better than mckeon_brm3 by 2.5 units +- 2 SE.
+```
+
+```{r}
+#| label: make table 2
+#| eval: true
+#| echo: true
+
+mckeon_random |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sd_.*")) |> 
+  mutate(intercept = b_Intercept) |> 
+  mutate(across(matches("^b_.*"), exp), intercept = plogis(intercept)) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
+
+#looks similar to mckeon_brm3 except for crabs not having a strong effect now
+
+```
+
+```{r}
+#| label: R2 again
+#| eval: true
+#| echo: true
+
+mckeon_random |> 
+  bayes_R2(re.form = NA, summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 24% of variation in predation can be explained by symbiont (fixed effects only)
+
+mckeon_random |> 
+  bayes_R2(re.form = ~ (1|BLOCK), summary=FALSE) |> 
+  median_hdci()
+#50% explained
+
+#conditional R2 - variation explained by fixed and random effects
+mckeon_random |> 
+  bayes_R2(re.form = ~SYMBIONT|BLOCK, summary=FALSE) |> 
+  median_hdci()
+#74% of variation in predation can be explained by symbiont (fixed effects AND random effects with random slope and intercept) --> total amount explained
+
+#26% of variation unexplained
+```
 
 # References

@@ -462,5 +462,159 @@ tobacco_brm3 |>
 ```
 
 # Further investigations
+## Fit the random intercept and random slope model
+
+```{r}
+#| label: random intercept and slope formula
+#| eval: true
+#| echo: true
+
+#1 represents intercept, would usually be (1 + TREATMENT|LEAF)
+#TREATMENT|LEAF is a slope for TREATMENT
+#its saying intercept and slope are conditional on LEAF (because in the plot we saw different slopes and intercepts for different leaves)
+tobacco_form <- bf(NUMBER ~ (TREATMENT|LEAF) + TREATMENT, 
+                   family = gaussian())
+
+```
+
+```{r}
+#| label: get priors
+#| eval: true
+#| echo: true
+
+get_prior(tobacco_form, data = tobacco)
+#need a new prior for "cor" --> correlation between intercept and slope
+#but its very simple, the default prior is the only sensible prior (lkj(1))
+
+priors <- priors +
+  prior(lkj_corr_cholesky(1), class='cor')
+
+```
+
+```{r}
+#| label: model with priors and data 2
+#| eval: true
+#| echo: true
+
+tobacco_random <- brm(tobacco_form,
+                 data = tobacco,
+                 prior = priors,
+                 sample_prior = 'yes',
+                 iter = 5000,
+                 warmup = 1600,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+#if you get divergence even after adjusting the delta, then increase warmup
+#want divergent transitions < 10
+
+```
+# MCMC sampling diagnostics
+
+```{r}
+#| label: examine all priors and posteriors 2
+#| eval: true
+#| echo: true
+
+tobacco_random |> 
+  SUYR_prior_and_posterior()
+
+#we aren't interested in correlation so its not a problem that the prior and posterior are so similar
+```
+
+```{r}
+#| label: conditional effects plot 2
+#| eval: true
+#| echo: true
+
+tobacco_random |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+
+```
+
+```{r}
+#| label: model diagnostics again
+#| eval: true
+#| echo: true
+
+tobacco_random$fit |> stan_trace(inc_warmup = TRUE)
+
+tobacco_random$fit |> stan_ac()
+
+tobacco_random$fit |> stan_rhat()
+
+tobacco_random$fit |> stan_ess() #ESS is low
+
+tobacco_random |> pp_check(type = 'dens_overlay', ndraws=100)
+```
+
+```{r}
+#| label: simulate residuals again
+#| eval: true
+#| echo: true
+
+tobacco.resids <- make_brms_dharma_res(tobacco_random, integerResponse = TRUE)
+testUniformity(tobacco.resids)
+plotResiduals(tobacco.resids, quantreg = FALSE)
+testDispersion(tobacco.resids)
+
+```
+
+```{r}
+#| label: summary table 2
+#| eval: true
+#| echo: true
+
+#absolute scale
+tobacco_random |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$|^sd_.*")) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 0), #less than 
+                  Pg = ~mean(.x > 0)) #greater than
+
+#Intercept: Average number of lesions in the strong treatment was 36.
+#Weak lesion has 8 less lesions (strong evidence).
+#sigma = unexplained variance (3.9 units of variation)
+#sd_LEAF__Intercept is how variable the different leaves are (3 units)
+#sd_LEAF__TREATMENTWeak is how variable the treatment is for different leaves (2 units) --> went down comapred to the random intercept model
+
+```
+
+```{r}
+#| label: comapre models
+#| eval: true
+#| echo: true
+
+loo_compare(loo(tobacco_brm3), loo(tobacco_random)) 
+#not different from each other when you add se_diff to elpd_diff so wasn't worth the extra effort to fit a random slope and intercept model
+```
+
+```{r}
+#| label: R2 again
+#| eval: true
+#| echo: true
+
+tobacco_random |> 
+  bayes_R2(re.form = NA, summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 35% of variation in lesions can be explained by treatment (fixed effects only)
+
+#conditional R2 - variation explained by fixed and random effects
+tobacco_random |> 
+  bayes_R2(re.form = ~TREATMENT|LEAF, summary=FALSE) |> 
+  median_hdci()
+#y = R^2, 66% of variation in lesions can be explained by treatment (fixed effects AND random effects) --> total amount explained
+
+#34% of variation unexplained
+```
 
 # References

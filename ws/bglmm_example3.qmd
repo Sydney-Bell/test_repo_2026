@@ -130,10 +130,50 @@ tree        Jan     85     tree1
 
 ```{r readData, results='markdown', eval=TRUE}
 starling <- read_csv('../data/starling_full.csv', trim_ws = TRUE)
+
+head(starling)
+
+#MONTH: category
+#SITUATION: category
+#BIRD: cateogry
+#MASS: numeric, continuous --> response
+
+#SITUATION --> BIRD --> MONTH
+
+#set factor levels and make the control (tree) first
+starling <- starling |> 
+  mutate(MONTH = factor(MONTH, levels = c('Jan', 'Nov')), 
+         BIRD = factor(BIRD),
+         SITUATION = factor(SITUATION, levels = c('tree', 'nest-box', 'inside', 'other')))
 ```
 
 
 # Exploratory data analysis
+
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
+
+starling |> ggplot(aes(y = MASS, x = SITUATION, fill = MONTH)) +
+  geom_boxplot()
+
+#looking for sections of the boxplot that increase progressively like the bottom section is small and they get bigger all the way to the top section. ALL of them would also have to look like this 
+```
+
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+starling |> 
+  ggplot(aes(y = MASS, x = MONTH, group = BIRD)) +
+  geom_point(aes(color = SITUATION)) +
+  geom_line(aes(x = as.numeric(MONTH), color = SITUATION)) +
+  facet_wrap(~SITUATION)
+  theme_classic()
+
+```
 
 ::: {.columns}
 :::: {.column width="50%"}
@@ -205,41 +245,188 @@ where $\Sigma$ is a covariance matrix.
 
 # Fit the model
 
-::: {.panel-tabset}
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
 
-:::
+starling_form <- bf(MASS ~ (1|BIRD) + MONTH * SITUATION, 
+                  family = gaussian())
+
+```
+
+```{r}
+#| label: get priors
+#| eval: true
+#| echo: true
+
+get_prior(starling_form, data = starling)
+
+starling |> 
+  group_by(SITUATION, MONTH) |> 
+  summarise(median(MASS), mad(MASS))
+
+priors <- prior(normal(88, 4.5), class = 'Intercept') + #for SD just round the first one
+  prior(normal(0, 13), class = 'b') + #need to account for differences between medians (control and lowest)
+  prior(student_t(3, 0, 5.2), class='sigma') + #largest variation
+  prior(student_t(3, 0, 5.2), class='sd') 
+```
+
+```{r}
+#| label: fit model - priors only
+#| eval: true
+#| echo: true
+#| cache: true
+
+starling_brm2 <- brm(starling_form,
+                 data = starling,
+                 prior = priors,
+                 sample_prior = 'only',
+                 iter = 5000,
+                 warmup = 1000,
+                 chains = 3, cores = 3,
+                 thin = 5,
+                 refresh = 0,
+                 backend = "cmdstanr",
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+```
+
+```{r}
+#| label: conditional effect plot
+#| eval: true
+#| echo: true
+
+starling_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() #&
+  #scale_y_log10()
+
+#the priors must be very wide
+```
+
+```{r}
+#| label: model with priors and data
+#| eval: true
+#| echo: true
+
+starling_brm3 <- update(starling_brm2, sample_prior = 'yes', refresh = 0)
+
+starling_brm3 |> 
+  conditional_effects() |> 
+  plot(points = TRUE, ask = FALSE, plot = FALSE) |> 
+  wrap_plots() #&
+  #scale_y_log10()
+
+#priors are clearly not driving the posterior
+```
 
 # MCMC sampling diagnostics
 
-::: {.panel-tabset}
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
 
+starling_brm3 |> 
+  SUYR_prior_and_posterior()
 
-:::
+starling_brm3$fit |> stan_trace(inc_warmup = TRUE)
+
+starling_brm3$fit |> stan_ac()
+
+starling_brm3$fit |> stan_rhat()
+
+starling_brm3$fit |> stan_ess() 
+
+starling_brm3 |> pp_check(type = 'dens_overlay', ndraws=100)
+
+starling.resids <- make_brms_dharma_res(starling_brm3, integerResponse = TRUE)
+testUniformity(starling.resids)
+plotResiduals(starling.resids)
+testDispersion(starling.resids)
+```
 
 
 # Model validation
 
-::: {.panel-tabset}
+```{r}
+#| label: summary table
+#| eval: true
+#| echo: true
 
-:::
+#absolute scale
+starling_brm3 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sigma$|^sd_.*")) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 0), #less than 
+                  Pg = ~mean(.x > 0)) #greater than
+
+#Intercept: Average mass of birds in trees in Jan was 90.7 (strong evidence).
+#Less bird mass in trees in Nov compared to Jan (-7g, strong evidence)
+#Less bird mass inside and other in Jan compared to trees in Jan (very strong evidence).
+#Less bird mass in nest box and inside in Nov than in trees in Jan (strong evidence).
+#sigma = unexplained variance (4.1 units of variation) --> within bird variation
+#sd is how variable the different birds are (1 units)
+
+#random slope model would account for extra variaiton (aka sigma)
+#where would you sample more/how would you change the sampling design? --> where is the most variation???
+#--> could compare tree vs inside OR other? Natural vs Artificial?
 
 
+# --> sample more during Nov-Jan?
+# --> females vs males?
+# --> distance to food source?
+```
 
 
-# Partial effects plots
+```{r}
+#| label: fractional scale table
+#| eval: true
+#| echo: true
 
-::: {.panel-tabset}
+#transformed to logs, subtracted the two, and then back transformed to get a percentage difference
+starling_brm3 |> 
+  emmeans(~MONTH|SITUATION) |> 
+  regrid(transform = "log") |> 
+  pairs() |> 
+  regrid()
 
-:::
+#Example: In trees, bird mass is 8% greater in Jan than Nov.
+```
 
+```{r}
+#| label: contrasts for situation
+#| eval: true
+#| echo: true
 
-# Model investigation
+starling_brm3 |> 
+  emmeans(~SITUATION) |> 
+  regrid(transform = "log") |> 
+  pairs() |> 
+  regrid()
 
-::: {.panel-tabset}
+#Bird mass is 9% greater in trees vs other.
+```
+# Summary Figure
 
-:::
+```{r}
+#| label: change order of months
+#| eval: true
+#| echo: true
 
-# Further investigations
+starling <- starling |> 
+  mutate(MONTH = factor(MONTH, levels = c('Nov', 'Jan')), 
+         BIRD = factor(BIRD),
+         SITUATION = factor(SITUATION, levels = c('tree', 'nest-box', 'inside', 'other')))
 
-::: {.panel-tabset}
+starling |> ggplot(aes(y = MASS, x = SITUATION, fill = MONTH)) +
+  geom_boxplot()
+```
 
