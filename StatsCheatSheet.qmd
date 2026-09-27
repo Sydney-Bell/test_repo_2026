@@ -1,0 +1,124 @@
+---
+title: "StatsCheatSheet"
+author: "Sydney Bell"
+format: html
+editor: visual
+---
+
+## Steps
+
+1.  Load in data
+2.  Decide what the variables are (categorical, numeric, continuous, etc + response, independent)
+3.  Are there random effects?
+4.  Centering and scaling (bglm_example4)
+
+If you have continuous predictor, you want to center it and scale it for Bayesian analyses. Centering allows predictors to be independent of each other. It’s mean becomes 0.
+
+In our bglm_example1, our lowest value isn’t 0 (y intercept) so we would center and use the average response (average x)
+
+Scaling: take value and divide by standard deviation (all then have SD of 1) —> therefore, never have very large values —> these are computationally high cost
+5.  Make categorical variables into factors and check their order
+6.  Decide on distribution
+
+### What’s our distribution and do our data fit assumption??
+
+![](images/images (1).png)
+
+
+7.  Exploratory data analysis
+- Normal = normality (boxplot), linearity (scatterplot)
+- Poisson = 
+- Bernoulli = scatterplot
+
+8. Model formula
+9. Define priors
+10. Fit the model
+11. Prior only model and plot conditional effects
+12. Prior AND data model and plot conditional effects
+13. Visualize priors and posteriors
+14. Check all diagnostics
+15. Generate summary and tables
+
+
+## Normal/Gausian
+-   measurements
+-   parameters: mean and variance
+-   assume: normality (boxplot), linearity (scatterplot), homogeneity of variance, independence, un-correlated predictors (multi-colinearity)
+
+Examples: bglm_example1
+Visualization: boxplot, scatterplot
+
+### Priors
+Will include slope, intercept, and sigma
+- median is more robust than mean and not influenced heavily by outliers (except for zero-inflated data)
+- mad is more robust than SD (median absolute deviation)
+```{r}
+#ask brms package for its recommended priors just to check
+get_prior(fert_form, data = fert)
+
+priors <- prior(normal("median", "mad"), class = "Intercept") +
+  prior(normal(0,"mad"), class="b") +
+  prior(student_t(3, 0, "mad"), class="sigma")
+```
+
+
+## Log Normal
+-   Example: a normal model gives negative bird predictions so need to try something else like a log normal distribution
+
+## Poisson
+-   lambda = mean, variance combined
+-   assuming mean/variance = 1 (dispersion), assume they are the same thing
+-   need link function to match Poisson function with slope
+
+### Priors
+```{r}
+#From bglm_example5
+
+#for Intercept look at the median of ALG1 (since this is the first factor/reference and that is where the intercept comes from)
+day |> 
+  group_by(TREAT) |> 
+  summarise(median(log(BARNACLE)), mad(log(BARNACLE))) #need to use log because we have the logit link function for a Poisson distribution (couldn't do this if we had zeros)
+
+#intercept and all betas
+priors <- prior(normal(3.1,0.3), class = 'Intercept') +
+  prior(normal(0,0.4), class = 'b') #keep mean at 0 because we want to let the data decide, variance will be something big enough to include all of the mad() variances
+```
+
+### Summary
+Will be generated on the log scale which is not helpful.
+Need to exp.
+```{r}
+exp(3.08) #this is the mean # of new recruits in ALG1
+
+#diff between ALG1 and ALG2
+exp(0.26) #but when you exp() it becomes multiplicative not additive so its 1.3 times greater than 21.8
+exp(3.08 + 0.26) #this gives you the mean of ALG2
+(1.29 - 1) * 100 #recruitment is 29% higher in the ALG2 group than the ALG1 group
+```
+
+
+## Bernoulli
+-   binary or proportions
+-   Bernoulli is a special case of binomial.
+      - Variance should equal 0
+      - Don't assume linearity
+-   Any event with a single trial and only two outcomes follows a Bernoulli distribution
+-   parameter: pie
+-   assume variance = 1
+
+Examples: bglm_example2
+Visualization: scatterplot with line to show distribution
+
+### Priors
+Slope mean will always be 0
+Slope variance will be 1
+
+Intercept mean will be 0
+Intercept variance will be 1
+
+```{r}
+#set priors
+priors <- prior(normal(0,1), class = 'Intercept') +
+  prior(normal(0,1), class = 'b')
+```
+
