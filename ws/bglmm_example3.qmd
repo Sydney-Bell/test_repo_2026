@@ -430,3 +430,10 @@ starling |> ggplot(aes(y = MASS, x = SITUATION, fill = MONTH)) +
   geom_boxplot()
 ```
 
+```{r}
+#this gives you the pairwise comparisons of the pairwise comparisons
+starling_brm3 |>
+  emmeans(~ MONTH | SITUATION)|>
+  contrast(interaction = c("pairwise", "pairwise"), by = NULL)
+```
+
