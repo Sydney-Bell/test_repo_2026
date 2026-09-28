@@ -31,13 +31,14 @@ Scaling: take value and divide by standard deviation (all then have SD of 1) —
 - Bernoulli = scatterplot
 
 8. Model formula
-9. Define priors
+9. Define priors 
 10. Fit the model
 11. Prior only model and plot conditional effects
-12. Prior AND data model and plot conditional effects
+12. Prior AND data model and plot conditional effects (priors should always be larger than posterior)
 13. Visualize priors and posteriors
 14. Check all diagnostics
 15. Generate summary and tables
+- summary() creates estimates on logit scale
 
 
 ## Normal/Gausian
