@@ -153,6 +153,8 @@ mckeon |>
   facet_wrap(~BLOCK)
   
 #might want to consider random slope model because the response is different for different corals
+
+#if we don't use random slope model, then there will be some uncertainty that we will miss and not account for
 ```
 
 ::: {.columns}
@@ -197,7 +199,7 @@ $\bf{Z}$ represents a cell means model matrix for the random intercepts associat
 # Fit the model
 
 ```{r}
-#| label: model formula
+#| label: random intercept model formula
 #| eval: true
 #| echo: true
 
@@ -213,8 +215,8 @@ mckeon_form <- bf(PREDATION ~ (1|BLOCK) + SYMBIONT,
 
 get_prior(mckeon_form, data = mckeon)
 
-priors <- prior(normal(0, 2), class = 'Intercept') + #predation for "none" group
-  prior(normal(0, 5), class = 'b') + #on logit scale you have a range of -3 to 3 ALWYAS, the mean is 0, and variance you need to be able to move quite a way so needs to be like 3-5
+priors <- prior(normal(0, 2), class = 'Intercept') + #predation for "none" group. It would be 0.5 (prob scale) but we transform to 0
+  prior(normal(0, 5), class = 'b') + #on logit scale you have a range of -3 to 3 ALWYAS, the mean is always 0 because you dont want to determine if it will be neg or post, and variance you need to be able to move quite a way so needs to be like 3-5
   prior(student_t(3, 0, 2), class='sd') #how variable is the "none" group across blocks?
 ```
 
@@ -251,6 +253,11 @@ mckeon_brm3 <- update(mckeon_brm2, sample_prior = 'yes',
 #| label: conditional effects
 #| eval: true
 #| echo: true
+
+mckeon_brm2 |> 
+  conditional_effects() |> 
+  plot(points = TRUE)
+#priors are wide enough to allow 0-1
 
 mckeon_brm3 |> 
   conditional_effects() |> 
@@ -390,12 +397,13 @@ mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |>
 #| eval: true
 #| echo: true
 
+#symbiont levels have to be the same order as you defined earlier
 cmat <- cbind('crab vs shrimp' = c(0, 1, -1, 0),
-              'borth vs one' = c(0, -0.5, -0.5, 1),
+              'both vs one' = c(0, -0.5, -0.5, 1),
               'any vs none' = c(-1, 1/3, 1/3, 1/3))
 cmat
 
-mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> 
+mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> #this back transforms to the scale of the response (probability)
   contrast(method = list(SYMBIONT = cmat)) |> 
   tidy_draws() |> 
   exp() |>  #need to undo logit scale
@@ -417,7 +425,7 @@ mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |>
 #back transformation before contrast is absolute scale
 mckeon_abs <- mckeon_brm3 |> emmeans(~SYMBIONT, type = "response") |> 
   regrid() |> 
-  contrast(method = list(SYMBIONT = cmat)) |> 
+  contrast(method = list(SYMBIONT = cmat)) |> #still in odds scale because we have been in emmeans
   tidy_draws() |> 
   summarise_draws(median, 
                   HDInterval::hdi,
@@ -439,9 +447,9 @@ mckeon_abs
 #| eval: true
 #| echo: true
 
-#1 represents intercept, would usually be (1 + TREATMENT|LEAF)
-#TREATMENT|LEAF is a slope for TREATMENT
-#its saying intercept and slope are conditional on LEAF (because in the plot we saw different slopes and intercepts for different leaves)
+#1 represents intercept, would usually be (1 + SYMBIONT|BLOCK)
+#SYMBIONT|BLOCK is a slope for SYMBIONT
+#its saying symbiont is conditional on block
 mckeon_form <- bf(PREDATION ~ (SYMBIONT|BLOCK) + SYMBIONT, 
                    family = bernoulli(link = 'logit'))
 
@@ -489,8 +497,10 @@ mckeon_random <- brm(mckeon_form,
 #| eval: true
 #| echo: true
 
+#should run diagnostics on new model first
+
 loo_compare(loo(mckeon_random), loo(mckeon_brm3)) 
-#mckeon_random is better than mckeon_brm3 by 2.5 units +- 2 SE.
+#mckeon_random is better than mckeon_brm3 by 2.5 units +- 2 SE. BUt have to multiply by 2
 ```
 
 ```{r}
@@ -498,9 +508,12 @@ loo_compare(loo(mckeon_random), loo(mckeon_brm3))
 #| eval: true
 #| echo: true
 
+#slopes can only be back transformed to odds ratio scale
+#intercepts can be back transformed to odds ratio scale and probability scale
+
 mckeon_random |> 
-  as_draws_df() |> 
-  dplyr::select(matches("^b_.*|^sd_.*")) |> 
+  as_draws_df() |> #gives us all columns/parameters we are estimating
+  dplyr::select(matches("^b_.*|^sd_.*")) |> #select variables we want
   mutate(intercept = b_Intercept) |> 
   mutate(across(matches("^b_.*"), exp), intercept = plogis(intercept)) |> 
   summarise_draws(median, 
@@ -511,6 +524,11 @@ mckeon_random |>
                   Pg = ~mean(.x > 1)) #greater than
 
 #looks similar to mckeon_brm3 except for crabs not having a strong effect now
+
+#b_Intercept = 26.5 times to be predated on in the control (none) than not
+#Intercept = predation in control is 96% likely
+
+#b_SYMBIONTcrabs = 26.5 * 0.12, odds of being predated on in crabs group are 88% lower than control but they are still 26.5 * 0.12 more likely to be predated on than not, however not strong evidence that is declined at all
 
 ```
 
