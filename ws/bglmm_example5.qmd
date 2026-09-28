@@ -125,15 +125,60 @@ on the same set of siblings.
 
 ```{r readData, results='markdown', eval=TRUE}
 owls <- read_csv("../data/owls.csv", trim_ws = TRUE)
+
+str(owls)
+
+#need an offset in the model because we have counts (Poisson or neg binomial) but then we are dividing by broodsize which means we won't have integers and cant use poisson or neg binomial. The offset fixes this
+
+#Nest
+#FoodTreatment = Cat
+#SexParent = Cat
+#SiblingNegotiation = counts, numeric
+#BroodSize = numeric
+#NegPerChick = numeric
+
+#always start with random effects
+# NEST (random effect)
+# FoodTreatment (fixed effect)
+# SexParent (fixed effect)
+# FoodTreatment:SexParent (fixed effect)
 ```
 
 
 # Data preparation
+```{r}
+#| label: data prep
+#| eval: true
+#| echo: true
 
+owls <- owls |> 
+  mutate(Nest = factor(Nest),
+         FoodTreatment = factor(FoodTreatment),
+         SexParent = factor(SexParent),
+         NCalls = SiblingNegotiation)
+```
 
 # Exploratory data analysis
 
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
 
+owls |> ggplot(aes(y = NegPerChick, x = FoodTreatment, fill = SexParent)) +
+  geom_violin() +
+  geom_point(aes(color = SexParent), position = position_jitterdodge(jitter.width = 0.3, dodge.width = 1)) +
+#except poisson to be skewed so this is okay
+#lots of zeros but don't know if thats a bad thing yet
+  
+#look at nests
+owls |> ggplot(aes(y = NegPerChick, x = FoodTreatment, fill = SexParent)) +
+  geom_violin() +
+  geom_point(aes(color = SexParent), position = position_jitterdodge(jitter.width = 0.3, dodge.width = 1)) +
+  facet_wrap(~Nest)
+
+#nests are different so maybe random slopes
+```
 
 Random intercept/slope model formula:
 
@@ -180,7 +225,98 @@ testing.
 Typically, when we are building up models, we start by constructing a
 model that only contains the hierarchical (random effects) structure.
 
+```{r}
+#| label: fit frequentest model
+#| eval: true
+#| echo: true
 
+library(glmmTMB)
+#start with a simple frequentest model, less time intensive 
+
+#logged broodsize because of the link function we are going to apply
+owls_glmm <- glmmTMB(NCalls ~ 1 + offset(log(BroodSize)) + (1 | Nest), data = owls, family = poisson(link = "log"))
+
+#residual diagnostics
+resid <- owls_glmm |> simulateResiduals(integerResponse = TRUE)
+testUniformity(resid)
+plot(resid) #looks like it might be overdispersed
+testDispersion(resid) #yeah overdispersed
+```
+
+```{r}
+#| label: fit bayesian model
+#| eval: true
+#| echo: true
+
+owls_form <- bf(NCalls ~ offset(log(BroodSize)) + (1 | Nest), family = poisson(link = "log"))
+
+#get priors
+get_prior(owls_form, data = owls)
+#intercept is the average number of calls per chick
+#get average
+owls |> summarise(Median = median(log(NegPerChick + 0.5)), MAD = mad(log(NegPerChick + 0.5)))
+
+#set priors
+priors <- prior(normal(0.5, 1), class = "Intercept") +
+  prior(student_t(3, 0, 1), class = "sd")
+
+owls_brm0 <- brm(owls_form,
+                 data=owls,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=3000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+owls_brm0 |> 
+  emmeans(~1, type = "response") |> 
+  as.data.frame() |> 
+  ggplot(aes( x= 1, y = rate)) +
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), color = "blue") +
+  geom_point(data = owls, aes(y = NegPerChick),
+             position = position_jitter(width = 0.2)) +
+  scale_y_continuous(trans = scales::pseudo_log_trans())
+#priors may be too narrow
+#check with data
+owls_brm1 <- update(owls_brm0, sample_prior = "yes", seed = 123)
+owls_brm1 |> SUYR_prior_and_posterior()
+#priors are fine
+```
+```{r}
+#| label: model diagnostics
+#| eval: true
+#| echo: true
+
+#MCMC diagnosits might not be helpful until the final model, this one isnt built up yet
+#residuals are important tho
+
+owls_brm1 |> 
+  SUYR_prior_and_posterior()
+
+owls_brm1$fit |> stan_trace(inc_warmup = TRUE)
+
+owls_brm1$fit |> stan_ac()
+
+owls_brm1$fit |> stan_rhat()
+
+owls_brm1$fit |> stan_ess() #ESS is low
+
+owls_brm1 |> pp_check(type = 'dens_overlay', ndraws=100) #not looking good
+
+owls.resids <- make_brms_dharma_res(owls_brm1, integerResponse = TRUE)
+testUniformity(owls.resids)
+plotResiduals(owls.resids, quantreg = FALSE)
+testDispersion(owls.resids)
+#big problem with the distribution --> model structure or Poisson 
+#check 0 inflation
+testZeroInflation(owls_brm1) # we have a zero problem!!
+
+```
 
 ### Model 2
 
@@ -200,120 +336,217 @@ model that only contains the hierarchical (random effects) structure.
 :::: {.panel-tabset}
 
 #### Fit model
+```{r}
+#| label: fit zero inflated model
+#| eval: true
+#| echo: true
 
+owls_form <- bf(NCalls ~ offset(log(BroodSize)) + (1|Nest), #modeling detectablility
+                zi = ~1, #avergae amount of detectablity across whole experiment, could put something else here like turbidity or something that would affect detection
+                family = zero_inflated_poisson(link = "log"))
+
+owls_form |> 
+  get_prior(data = owls)
+#need to include zi Intercept
+priors <- prior(normal(0.5, 1), class = "Intercept") +
+  prior(student_t(3, 0, 1), class = "sd") +
+  prior(normal(0, 1), class = "Intercept", dpar = "zi")
+```
+
+```{r}
+#| label: run zero inflated model
+#| eval: true
+#| echo: true
+
+owls_brm2 <- brm(owls_form,
+                 data=owls,
+                 prior=priors,
+                 sample_prior="yes",
+                 iter=3000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=10,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+```
 
 ```{r posterior2h_2c, results='markdown', eval=TRUE, fig.width = 7, fig.height = 5}
-owls_brm2b |> SUYR_prior_and_posterior()
+owls_brm2 |> SUYR_prior_and_posterior()
+```
+
+```{r}
+#| label: model diagnostics again
+#| eval: true
+#| echo: true
+
+#MCMC diagnosits might not be helpful until the final model, this one isnt built up yet
+#residuals are important tho
+
+owls_brm2 |> 
+  SUYR_prior_and_posterior()
+
+owls_brm2$fit |> stan_trace(inc_warmup = TRUE)
+
+owls_brm2$fit |> stan_ac()
+
+owls_brm2$fit |> stan_rhat()
+
+owls_brm2$fit |> stan_ess() #ESS is low
+
+owls_brm2 |> pp_check(type = 'dens_overlay', ndraws=100) #not looking good
+
+owls.resids <- make_brms_dharma_res(owls_brm2, integerResponse = TRUE)
+testUniformity(owls.resids)
+plotResiduals(owls.resids, quantreg = FALSE)
+testDispersion(owls.resids)
+#check 0 inflation
+testZeroInflation(owls_brm2) # zeros look fine but other areas are off
+
+```
+```{r}
+#| label: add in fixed effects for frequentest
+#| eval: true
+#| echo: true
+
+owls_glmm3 <- glmmTMB(NCalls ~ FoodTreatment * SexParent + offset(log(BroodSize)) + (1 | Nest), 
+                      ziformula = ~1, data = owls, family = poisson(link = "log"))
+
+resids <- owls_glmm3 |> simulateResiduals(integerResponse = TRUE)
+plot(resids)
+#still an issue with the structure of this model (included factors etc)
+#could be three things 1) need to include random effects, 2) assumed detectibility was a constant but might be wrong, 3) perhaps overdispersion
+
+#maybe dectectability is skewed, include food treatment and parent
+owls_glmm4 <- glmmTMB(NCalls ~ FoodTreatment * SexParent + offset(log(BroodSize)) + (1 | Nest), 
+                      ziformula = ~ FoodTreatment * SexParent, 
+                      data = owls, family = poisson(link = "log"))
+resids <- owls_glmm4 |> simulateResiduals(integerResponse = TRUE)
+plot(resids) #looks slightly better
+owls_glmm4 |> summary()
+#intercept is detectability of female deprived group
+plogis(-1.3696) #=20% false 0s
+exp(-1.3696) #odds of being false 0s is 1:4
+
+#estimates in zero inflated model have to be exp because they are all of log scale
+exp(1.13) #odds are 3x higher when satiated
+
+```
+```{r}
+#| label: frequentest model w updated structure
+#| eval: true
+#| echo: true
+
+owls_glmm5 <- glmmTMB(NCalls ~ FoodTreatment*SexParent + offset(log(BroodSize)) +
+                        (FoodTreatment*SexParent | Nest),
+                      ziformula = ~ FoodTreatment*SexParent, data = owls, family = poisson(link = "log"))
+resids <- owls_glmm5 |> simulateResiduals(integerResponse = TRUE)
+plot(resids)
+testDispersion(resids)
+```
+```{r}
+#| label: bayesian model w updated structure
+#| eval: true
+#| echo: true
+
+owls_form <- bf(NCalls ~ FoodTreatment*SexParent + 
+                  offset(log(BroodSize)) + 
+                  (FoodTreatment*SexParent|Nest), 
+                zi = ~ FoodTreatment*SexParent,
+                family = zero_inflated_poisson(link = "log"))
+
+owls_form |> get_prior(data = owls)
+
+owls |> dplyr::group_by(FoodTreatment, SexParent) |> 
+  summarise(Median = median(log(NegPerChick + 0.5)), MAD = mad(log(NegPerChick + 0.5)))
+```
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+priors <- prior(normal(0.7, 1), class = "Intercept") +
+  prior(normal(0,1), class = "b") +
+  prior(student_t(3, 0, 1), class = "sd") +
+  prior(lkj_corr_cholesky(1), class = "cor") +
+  prior(normal(0, 1), class = "Intercept", dpar = "zi") +
+  prior(normal(0, 1), class = "b", dpar = "zi")
+```
+
+```{r}
+#| label: run hopefully final model
+#| eval: true
+#| echo: true
+
+owls_brm6 <- brm(owls_form,
+                 data=owls,
+                 prior=priors,
+                 sample_prior="yes",
+                 iter=3000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=10,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+```
+#### MCMC sampling diagnostics
+```{r}
+#| label: model diagnostics again
+#| eval: true
+#| echo: true
+
+#MCMC diagnosits might not be helpful until the final model, this one isnt built up yet
+#residuals are important tho
+
+owls_brm6$fit |> stan_trace(inc_warmup = TRUE)
+
+owls_brm6$fit |> stan_ac()
+
+owls_brm6$fit |> stan_rhat()
+
+owls_brm6$fit |> stan_ess() #ESS is low
+
+owls_brm6 |> pp_check(type = 'dens_overlay', ndraws=100) #not looking good
+
+owls.resids <- make_brms_dharma_res(owls_brm6, integerResponse = TRUE)
+testUniformity(owls.resids)
+plotResiduals(owls.resids, quantreg = FALSE)
+testDispersion(owls.resids)
+#check 0 inflation
+testZeroInflation(owls_brm6) # zeros look fine but other areas are off
+
+owls_brm6 |> 
+  conditional_effects("FoodTreatment:SexParent") |> 
+  plot(points = TRUE)
+
+get_variables(owls_brm6)
+```
+```{r}
+#| label: summary table
+#| eval: true
+#| echo: true
+
+owls_brm6 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sd_.*")) |> 
+  mutate(across(matches("^b_.*"), exp)) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
+
+#b_Intercept = average of 2.3 calls per chick in the deprived female group, BUT conditional effects plot shows calls per NEST
+#b_FoodTreatmentSatiated = difference between female deprived and female satiated. Calls per chick in satiated group are halved
+# no evidence of interaction effects
 ```
 
 
-#### MCMC sampling diagnostics
-
-
-
-#### Model validation
-
-::::: {.panel-tabset}
-
-##### pp check
-
-
-
-
-##### DHARMa residuals
-
-
-:::::
-
-::::
-
-### Model 3
-
-:::: {.panel-tabset}
-#### Fit model
-
-```{r posterior2h_3c, results='markdown', eval=TRUE, fig.width = 7, fig.height = 5}
-owls_brm3b |> SUYR_prior_and_posterior()
-```
-
-#### MCMC sampling diagnostics
-
-
-
-#### Model validation
-
-::::: {.panel-tabset}
-
-##### pp check
-
-
-
-
-##### DHARMa residuals
-
-
-:::::
-
-::::
-
-### Model 4
-
-:::: {.panel-tabset}
-#### Fit model
-
-
-```{r posterior2h_4c, results='markdown', eval=TRUE, fig.width = 7, fig.height = 5}
-owls_brm4b |> SUYR_prior_and_posterior()
-```
-
-#### MCMC sampling diagnostics
-
-
-
-#### Model validation
-
-::::: {.panel-tabset}
-
-##### pp check
-
-
-
-
-##### DHARMa residuals
-
-
-:::::
-
-::::
-
-### Model 5
-
-:::: {.panel-tabset}
-#### Fit model
-
-```{r posterior2h_5c, results='markdown', eval=TRUE, fig.width = 7, fig.height = 5}
-## owls_brm5b |> SUYR_prior_and_posterior()
-```
-
-#### MCMC sampling diagnostics
-
-
-
-#### Model validation
-
-::::: {.panel-tabset}
-
-##### pp check
-
-
-
-
-##### DHARMa residuals
-
-
-:::::
-
-::::
 
 ### Comparisons
 
