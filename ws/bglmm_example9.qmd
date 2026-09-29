@@ -76,6 +76,7 @@ Load the necessary libraries
 #| message: false
 #| cache: false
 
+#install.packages("effects")
 library(car)       #for regression diagnostics
 library(broom)     #for tidy output
 library(ggfortify) #for model diagnostics
@@ -129,6 +130,8 @@ dependent on the overall bleaching severity.
 ```{r readData, results='markdown', eval=TRUE}
 hughes = read_csv('../data/hughes.csv', trim_ws=TRUE)
 glimpse(hughes)
+
+hughes$HABITAT |> unique()
 ```
 
 | REEF   | HABITAT | SECTOR | SCORE |
@@ -140,7 +143,24 @@ glimpse(hughes)
 
 
 # Data preparation
+SECTOR (fixed effect) - reef can only be found in one of the sectors
+REEF (random effect) - reef can only be found in one of the sectors and aren't replicated across
+HABITAT (fixed effect) - can be multiple habitats in each reef
+SECTOR:HABITAT (fixed effect) - interaction term
 
+```{r}
+#| label: data prep
+#| eval: true
+#| echo: true
+
+#random effects are always set as factors
+
+hughes <- hughes |> 
+  mutate(REEF = factor(REEF),
+         HABITAT = factor(HABITAT),
+         SECTOR = factor(SECTOR, levels = c("North", "Central", "South")),
+         oSCORE = factor(SCORE, ordered = TRUE)) #this allows it to be handled as an ordinal regression
+```
 
 # Exploratory Data Analysis
 
@@ -157,27 +177,178 @@ where $y$ is the observed categorical response, $\boldsymbol{X}$ is a ($n \times
 p$) effects model matrix, $\boldsymbol{\beta}$ are the $p$ effects parameters
 and $\theta_i$ are the $K-1$ category thresholds
 
+```{r}
+#| label: visualize data
+#| eval: true
+#| echo: true
 
+#treat as a binomial for visual purposes (jitter. Cant look at assumptions)
+
+#symbiont x-axis
+#oSCORE y-axis
+#facet by blocks
+
+hughes |> 
+  ggplot(aes(y = oSCORE, x = HABITAT)) +
+  geom_point(position = position_jitter()) +
+  facet_wrap(~SECTOR)
+
+#now add lines to join up dots of each reef
+hughes |> 
+  ggplot(aes(y = oSCORE, x = HABITAT)) +
+  geom_point(position = position_jitter()) +
+  geom_line(aes(y = as.numeric(oSCORE), x = as.numeric(HABITAT), group = REEF),
+            position = position_jitter()) +
+  facet_wrap(~SECTOR)
+#lines aren't parallel looking so consider random slopes
+```
 
 
 # Fit the model
 
 ::: {.panel-tabset}
+```{r}
+#| label: formula
+#| eval: true
+#| echo: true
 
+hughes_form <- bf(oSCORE ~ HABITAT*SECTOR + (1|REEF),
+                  family = cumulative(link = "logit", threshold = "flexible"))
 
+```
+
+```{r}
+#| label: check priors
+#| eval: true
+#| echo: true
+
+get_prior(hughes_form, data = hughes)
+#5 intercepts, one for each SCORE level, series of binomials
+#because its a series of binomials, we can't get prior info from the data
+```
+
+```{r}
+#| label: set priors
+#| eval: true
+#| echo: true
+
+priors <- prior(normal(0, 1), class = "Intercept") +
+  prior(normal(0, 1), class = "b") +
+  prior(student_t(3, 0, 1), class = "sd")
+
+#first intercept = prob of being in cat 0 vs any above 0, for the north crest (first levels)
+#second intercept = prob of being in cat 1 vs any above 1, for the north crest (first levels)
+```
+
+```{r}
+#| label: fit model priors only
+#| eval: true
+#| echo: true
+
+hughes_brm1 <- brm(hughes_form,
+                 data=hughes,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1)
+```
+
+```{r}
+#| label: conditional effects plot
+#| eval: true
+#| echo: true
+
+hughes_brm1 |> 
+  conditional_effects("HABITAT", 
+                      conditions = make_conditions(hughes_brm1, "SECTOR"),
+                      categorical = TRUE)
+```
+
+```{r}
+#| label: fit model
+#| eval: true
+#| echo: true
+
+hughes_brm2 <- update(hughes_brm1,
+                 sample_prior="yes",
+                 refresh=100,
+                 seed = 1)
+
+saveRDS(hughes_brm2, file = "D:/GitHub/SUYRs_public/models/hughes_brm2.rds")
+hughes_brm2a <- readRDS(file = "D:/GitHub/SUYRs_public/models/hughes_brm2.rds")
+
+#how to store multiple things
+#save(hughes_brm2, hughes, hughes_form, priors, file = "hughes_analysis.RData")
+#load(file = "hughes_analysis.RData")
+```
+
+```{r}
+#| label: effects plot again
+#| eval: true
+#| echo: true
+
+hughes_brm2 |> 
+  conditional_effects("HABITAT",
+                      conditions = make_conditions(hughes_brm2, "SECTOR"),
+                      categorical = TRUE)
+```
 :::
 
 # MCMC sampling diagnostics
 
 ::: {.panel-tabset}
+```{r}
+#| label: diagnostics
+#| eval: true
+#| echo: true
 
+hughes_brm2$fit |> stan_trace(inc_warmup = TRUE)
+
+#have over 10 trace plots so need to cut them down so we can see them
+get_variables(hughes_brm2)
+params <- get_variables(hughes_brm2) |> str_subset("^b_.*|^sd_.*")
+params
+#now do this
+hughes_brm2$fit |> stan_trace(pars = params)
+
+hughes_brm2$fit |> stan_ac(pars = params)
+
+hughes_brm2$fit |> stan_rhat()
+
+hughes_brm2$fit |> stan_ess()
+
+hughes_brm2 |> pp_check(type = 'dens_overlay', ndraws=100) 
+
+hughes.resids <- make_brms_dharma_res(hughes_brm2, integerResponse = TRUE)
+testUniformity(hughes.resids)
+plotResiduals(hughes.resids, quantreg = FALSE, asFactor = FALSE)
+testDispersion(hughes.resids)
+#nothing super obviously wrong
+```
 
 :::
 
-# Model validation
+# Model summary
 
 ::: {.panel-tabset}
+```{r}
+#| label: summary
+#| eval: true
+#| echo: true
 
+hughes_brm2 |> summary()
+plogis(-8.5) #Intercept[1] = probability of North C having a score of 0 vs a higher one
+plogis(-0.4)
+exp(-0.4) #odds of being in cat 3 vs cat 4 is 0.67 for North C
+
+#HABITATF is a slope aka a difference
+exp(-0.34) # change of 0.7 on a fractional scale, prob of bleaching is lower in habitat f than habitat c
+```
 
 :::
 
@@ -185,16 +356,118 @@ and $\theta_i$ are the $K-1$ category thresholds
 
 ::: {.panel-tabset}
 
+```{r}
+#| label: get avergaes for each group
+#| eval: true
+#| echo: true
+
+#create new data
+newdata <- hughes |> 
+  distinct(HABITAT, SECTOR)
+newdata
+
+#asking to predict bleaching scores for the 12 combinations we just created
+predict(hughes_brm2, newdata = newdata, re_formula = NA)
+
+#weighted average = average amount of bleachin in North C is 3.535
+sum(c(0.0004166667, 0.005000000, 0.05500000, 0.33833333, 0.6012500000) * 0:4)
+#but we did this on the summary, not the full posterior (which would've included SD)
+
+#If you just calculated the averages for the raw data, you're assuming a normal/gaussian distribution and all of the assumptions that come along with that
+#thats why you need to do this ordinal model
+
+#bayesian version of predict()
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) #re_formula is saying to ignore random effects, just focused on SECTOR/HABITAT level
+
+#as a check, start with just one group/restrict the data
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  filter(.draw == 1, HABITAT == "C", SECTOR == "North")
+#we would have to multiply .category by .epred to get average for each group for draw 1
+#need to make .category fctors into a number first though
+
+#try to make a new column for this calculation
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) #this prevents the cateogries from being changed to 1,2,3,4,5
+
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) |> 
+  mutate(score = .epred * bleaching)
+
+#now need to add up the scores to get one average score per Habitat/Sector but we want one for each draw
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) |> 
+  mutate(score = .epred * bleaching) |> 
+  ungroup() |> 
+  group_by(HABITAT, SECTOR, .draw) |> 
+  summarise(score = sum(score))
+
+#If we want all habitats, all sectors, and all draws...just remove the filter
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  #filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) |> 
+  mutate(score = .epred * bleaching) |> 
+  ungroup() |> 
+  group_by(HABITAT, SECTOR, .draw) |> 
+  summarise(score = sum(score))
+
+#now need to summarise across draws
+epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  #filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) |> 
+  mutate(score = .epred * bleaching) |> 
+  ungroup() |> 
+  group_by(HABITAT, SECTOR, .draw) |> 
+  summarise(score = sum(score)) |> 
+  summarise_draws(median, HDInterval::hdi)
+```
 
 :::
-
-
 
 
 # Further investigations
 
 ::: {.panel-tabset}
+```{r}
+#| label: comparisons
+#| eval: true
+#| echo: true
 
+#remove summarise_draws because we want the full posteriors, always work on un-summarised data
+cellmeans <- epred_draws(hughes_brm2, newdata = newdata, re_formula = NA) |> 
+  #filter(.draw == 1, HABITAT == "C", SECTOR == "North") |> 
+  mutate(bleaching = as.numeric(as.character(.category))) |> 
+  mutate(score = .epred * bleaching) |> 
+  ungroup() |> 
+  group_by(HABITAT, SECTOR, .draw) |> 
+  summarise(score = sum(score)) 
+
+cellmeans |> 
+  compare_levels(var = score, by = HABITAT, comparison = emmeans_comparison("pairwise"))
+
+cellmeans |> 
+  compare_levels(var = score, by = HABITAT, comparison = emmeans_comparison("pairwise")) |> 
+  summarise_draws(median, HDInterval::hdi, Pl = ~mean(.x < 0), Pg = ~mean(.x > 0))
+
+#absolute scale
+#For example, habitat C is 0.1 units higher than habitat F in the North and there is strong evidence
+```
+
+```{r}
+#| label: fractional scale table
+#| eval: true
+#| echo: true
+
+cellmeans |> 
+  mutate(lscore = log(score)) |> 
+  compare_levels(var = lscore, by = HABITAT, comparison = emmeans_comparison("pairwise")) |> 
+  mutate(score = exp(lscore)) |> 
+  summarise_draws(median, HDInterval::hdi, Pl = ~mean(.x < 1), Pg = ~mean(.x > 1))
+
+#bleaching is 3% higher in C North than F North
+```
 :::
 
 

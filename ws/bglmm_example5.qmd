@@ -549,7 +549,35 @@ owls_brm6 |>
 
 
 ### Comparisons
+```{r}
+#| label: comparisons
+#| eval: true
+#| echo: true
 
+#this gives us average calls per chick
+owls_brm6 |> emmeans(~FoodTreatment*SexParent, type = "response")
+
+# the | runs FoodTreatment separately for each SexParent
+owls_brm6 |> emmeans(~FoodTreatment | SexParent, type = "response")
+
+#pairs() compares things, so its comparing all combinations
+owls_brm6 |> 
+  emmeans(~FoodTreatment*SexParent, type = "response") |> 
+  pairs()
+
+#but when you do it this way you get FoodTreatment compared separately for each SexParent
+#think of SexParent here as the grouping by variable
+#these are on a fractional scale because type = "response" back transforms 
+owls_brm6 |> 
+  emmeans(~FoodTreatment | SexParent, type = "response") |> 
+  pairs()
+
+#if we add regrid before the pairs, then the transformation occurs before subtraction and we can get absolute values/differences
+owls_brm6 |> 
+  emmeans(~FoodTreatment | SexParent, type = "response") |> 
+  regrid() |> 
+  pairs()
+```
 
 Conclusions:
 - evidently, the zero-inflated negative binomial model with random
