@@ -129,38 +129,222 @@ glimpse(ltmp)
 
 
 # Data preparation
+Order:
+REEF (random)
+SITE (random)
+TRANSECT (random)
+REPORT_YEAR (fixed)
 
+Could model HC (percentage) as a beta model but they are very messy and not as reliable because you could get 10% from 2/10 or 10/200 etc
+
+```{r}
+#| label: data prep
+#| eval: true
+#| echo: true
+
+#categorical variables and filter to just one reef
+ltmp_sub <- ltmp |> 
+  dplyr::filter(AIMS_REEF_NAME == "Agincourt Reef No.1") |> 
+  droplevels() |> #need to remove factors/levels that aren't included in Agincourt Reef No.1
+  mutate(SITE_NO = factor(paste(AIMS_REEF_NAME, SITE_NO)),
+         TRANSECT_NO = factor(paste(SITE_NO, TRANSECT_NO)),
+         fYEAR = factor(REPORT_YEAR))
+ltmp_sub
+```
 
 # Exploratory Data Analysis
 
+```{r}
+#| label: visualize data
+#| eval: true
+#| echo: true
 
+ltmp_sub |> 
+  ggplot(aes(y = HC, x = REPORT_YEAR)) +
+  geom_line(aes(group = TRANSECT_NO, colour = SITE_NO)) +
+  geom_point()
+#linearity is not met!!!
+```
 
 # Fit the model
 
 ::: {.panel-tabset}
 
+```{r}
+#| label: model formula
+#| eval: true
+#| echo: true
 
+#treat YEAR as categorical 
+#The intercept would be the first year (1995) but this first year had less photos and wonky data
+#so lets change the intercept to the most recent year instead using reverse
+ltmp_sub <- ltmp_sub |> 
+  mutate(fYEAR = factor(fYEAR, levels = rev(levels(fYEAR))))
+
+#writing the formula this way has transect nested within site
+ltmp_sub_form <- bf(n.points | trials(total.points) ~ fYEAR + (1|SITE_NO) + (1|TRANSECT_NO),
+                    family = binomial(link = "logit"))
+
+```
+
+```{r}
+#| label: priors
+#| eval: true
+#| echo: true
+
+get_prior(ltmp_sub_form, data = ltmp_sub)
+
+#intercept is the average HC at 2023
+ltmp_sub |> group_by(fYEAR) |> 
+  summarise(Median = median(qlogis(HC/100)), MAD = mad(qlogis(HC/100)))
+
+#set priors
+priors <- prior(normal(-0.8, 0.3), class = "Intercept") +
+  prior(normal(0, 3), class = "b") +
+  prior(student_t(3, 0, 0.5), class = "sd")
+```
+
+```{r}
+#| label: run model
+#| eval: true
+#| echo: true
+
+ltmp_sub_brm1 <- brm(ltmp_sub_form,
+                 data=ltmp_sub,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+
+ltmp_sub_brm1 |> 
+  conditional_effects(conditions = data.frame(total.points = 200)) |> 
+  plot(points = TRUE)
+```
+```{r}
+#| label: run model with data
+#| eval: true
+#| echo: true
+
+ltmp_sub_brm2 <- update(ltmp_sub_brm1,
+                        sample_prior = "yes",
+                        chains = 3, cores = 3,
+                        control = list(adapt_delta = 0.99, max_treedepth = 20), #sometimes have to increase this when you have a more complex model
+                        seed = 1,
+                        refresh = 100)
+
+ltmp_sub_brm2 |> 
+  conditional_effects(conditions = data.frame(total.points = 200)) |> 
+  plot(points = TRUE)
+```
 :::
 
 # MCMC sampling diagnostics
 
 ::: {.panel-tabset}
 
+```{r}
+#| label: diagnostics
+#| eval: true
+#| echo: true
 
-:::
+ltmp_sub_brm2 |> 
+  hypothesis("fYEAR2021=0") |> 
+  plot()
 
-# Model validation
+ltmp_sub_brm2$fit |> stan_trace(inc_warmup = TRUE)
 
-::: {.panel-tabset}
+#have over 10 trace plots so need to cut them down so we can see them
+get_variables(ltmp_sub_brm2)
+params <- get_variables(ltmp_sub_brm2) |> str_subset("^b_.*|^sd_.*")
+params
+#now do this
+ltmp_sub_brm2$fit |> stan_trace(pars = params)
 
+ltmp_sub_brm2$fit |> stan_ac(pars = params)
 
+ltmp_sub_brm2$fit |> stan_rhat()
+
+ltmp_sub_brm2$fit |> stan_ess()
+
+ltmp_sub_brm2 |> pp_check(type = 'dens_overlay', ndraws=100) 
+
+ltmp.resids <- make_brms_dharma_res(ltmp_sub_brm2, integerResponse = TRUE)
+testUniformity(ltmp.resids)
+plotResiduals(ltmp.resids, quantreg = FALSE, asFactor = FALSE)
+testDispersion(ltmp.resids)
+#nothing super obviously wrong
+```
 :::
 
 # Model investigation
 
 ::: {.panel-tabset}
+```{r}
+#| label: summary
+#| eval: true
+#| echo: true
 
+#not really needed because we are just interested in trends
+#but we will look and see where the most variation is
+ltmp_sub_brm2 |> summary()
+#there is more variability at the transect level (0.2) than the site level (0.12)
+```
 
+```{r}
+#| label: plot
+#| eval: true
+#| echo: true
+
+#proportion of coral in each year
+ltmp_sub_brm2 |> 
+  emmeans(~fYEAR, type = "response") |> 
+  as.data.frame() |> 
+  mutate(Year = as.numeric(as.character(fYEAR))) |> 
+  ggplot(aes(y = prob, x = Year)) +
+  geom_ribbon(aes(ymin = lower.HPD, ymax = upper.HPD), 
+              fill = "orange", 
+              alpha = 0.4) +
+  geom_line(color = "black") +
+  geom_point() +
+  scale_y_continuous("Hard coral cover (%)", labels = function(x) x*100) +
+  theme_classic()
+```
+
+```{r}
+#| label: practice in making a function in R
+#| eval: true
+#| echo: true
+
+SE <- function(x) {
+  sd(x) / sqrt(length(x))
+}
+
+SE(1:5)
+```
+
+```{r}
+#| label: comparisons between years
+#| eval: true
+#| echo: true
+
+newdata <- data.frame(fYEAR = c(2023, 2017))
+
+ltmp_sub_brm2 |> 
+  emmeans(~fYEAR, at = newdata, type = "response") |> 
+  pairs()
+
+#coral over is 3.77 times higher in 2023 than 2017 --> 277% higher (3.77-1)*100
+
+#when there's a single value --> need to log --> becomes %
+#when there are 2 things/a slope/a difference between 2 things --> need to exp --> becomes fractional/odds scale
+```
 :::
 
 

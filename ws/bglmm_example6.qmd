@@ -223,15 +223,53 @@ control   200     3      13.00
 ```{r}
 #| label: readData
 copper <- read_csv("../data/copper.csv", trim_ws = TRUE)
+
+glimpse(copper)
 ```
 
 # Data preparation
+COPPER (fixed effect)
+PLATE (random effect)
+DISTANCE (fixed effect)
+COPPER:PLATE (fixed effect)
+WORMS is counts/area which limits our options...can't do Poisson or Neg Binomial
 
 Let start by declaring the categorical variables and random effect as factors.
 
+```{r}
+#| label: set factors
+#| eval: true
+#| echo: true
 
+#in this case, we want DIST to be categorical because if continuous youd have to fit a straight line and that would assume linearity, also want to compare different distances, AND we dont know what the actual distances are. If we had 20 distances, then you'd probably make it continuous
+copper <- copper |> 
+  mutate(COPPER = factor(COPPER),
+         PLATE = factor(PLATE),
+         DIST = factor(DIST),
+         AREA = 4,
+         COUNT = WORMS * AREA) #creating this variable because we know the areas were all 4
+
+#need an offset so that we can do a Poisson with this count data
+```
 
 # Exploratory data analysis
+
+```{r}
+#| label: boxplot
+#| eval: true
+#| echo: true
+
+#categorical variables = boxplot or violin plot
+
+copper |> ggplot(aes(y = WORMS, x = DIST, fill = COPPER)) +
+  geom_boxplot()
+#be mindful of 0s
+
+copper |> ggplot(aes(y = WORMS, x = DIST, fill = COPPER)) +
+  geom_point() +
+  facet_wrap(~ COPPER+PLATE)
+#not a lot of support for random slopes when looking at plates within each COPPER treatment
+```
 
 Model formula:
 $$
@@ -267,24 +305,151 @@ model families is somewhat restricted.  Out choices are:
 # Fit the model
 
 ::: {.panel-tabset}
+```{r}
+#| label: fit bayesian model
+#| eval: true
+#| echo: true
+
+#the offset also needs to be on a log scale since that is the link function here
+#order doesn't matter
+copper_form <- bf(COUNT ~ COPPER*DIST + (1 | PLATE) + offset(log(AREA)) , family = poisson(link = "log"))
+
+#get priors
+get_prior(copper_form, data = copper)
+#intercept is the average number of counts per area (density) in control plates at distance 1
+#get average
+copper |> group_by(COPPER, DIST) |> 
+  summarise(Median = median(log(WORMS + 0.5)), MAD = mad(log(WORMS + 0.5)))
+
+#set priors
+priors <- prior(normal(2.4, 0.2), class = "Intercept") +
+  prior(normal(0, 3), class = "b")
+  prior(student_t(3, 0, 1), class = "sd")
+
+copper_brm1 <- brm(copper_form,
+                 data=copper,
+                 prior=priors,
+                 sample_prior="only",
+                 iter=5000,
+                 chains=3, cores=3, #one core per chain
+                 warmup=1000,
+                 thin=5,
+                 backend="cmdstanr",
+                 refresh=0,
+                 seed = 1,
+                 control = list(adapt_delta = 0.99))
+
+copper_brm1 |> 
+  conditional_effects("COPPER:DIST") |> 
+  plot(points = TRUE)
+#priors are very wide but because we only have a few data points, its okay. If you had a lot of data you would want to change priors and rerun
+```
+```{r}
+#| label: refit with data
+#| eval: true
+#| echo: true
+
+copper_brm2 <- update(copper_brm1,
+                      sample_prior = "yes",
+                      control = list(adapt_delta = 0.99),
+                      seed = 1,
+                      refresh = 0)
+
+#this shows counts though not WORMS (aka density)
+copper_brm2 |> 
+  conditional_effects("COPPER:DIST") |> 
+  plot(points = TRUE)
+
+#can do this to get density (although it still says counts)
+copper_brm2 |> 
+  conditional_effects("COPPER:DIST", conditions = list(AREA = 1))
+```
 
 :::
 
 
 # MCMC sampling diagnostics
 
+```{r}
+#| label: diagnostics
+#| eval: true
+#| echo: true
+
+copper_brm2 |> SUYR_prior_and_posterior()
+
+copper_brm2$fit |> stan_trace(inc_warmup = TRUE)
+
+#have over 10 trace plots so need to cut them down so we can see them
+get_variables(copper_brm2)
+params <- get_variables(copper_brm2) |> str_subset("^b_.*|^sd_.*")
+params
+#now do this
+copper_brm2$fit |> stan_trace(pars = params)
+
+copper_brm2$fit |> stan_ac(pars = params)
+
+copper_brm2$fit |> stan_rhat()
+
+copper_brm2$fit |> stan_ess()
+
+copper_brm2 |> pp_check(type = 'dens_overlay', ndraws=100) 
+
+copper.resids <- make_brms_dharma_res(copper_brm2, integerResponse = TRUE)
+testUniformity(hughes.resids)
+plotResiduals(hughes.resids, quantreg = FALSE, asFactor = FALSE)
+testDispersion(hughes.resids)
+#nothing super obviously wrong
+```
+
 :::
 
 
-# Model validation
+# Summary Table
 
+```{r}
+#| label: summary table
+#| eval: true
+#| echo: true
 
-# Partial effects plots
+#in log scale so we want to exp
 
+copper_brm2 |> 
+  as_draws_df() |> 
+  dplyr::select(matches("^b_.*|^sd_.*")) |> 
+  mutate(across(matches("^b_.*"), exp)) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi,
+                  rhat, 
+                  ess_bulk,
+                  Pl = ~mean(.x < 1), #less than 
+                  Pg = ~mean(.x > 1)) #greater than
 
-# Model investigation
+#b_Intercept = average density of 10.6 worms/area in the control group at distance = 1
+#b_COPPERWeek1 = difference between control and Week1 groups at distance = 1. Density is 10.8*0.67 = 7.236 in Week1
+10.8*0.67
+# strong evidence of interaction effects in CopperWeek2:DIST2, CopperWeek2:DIST4, CopperWeek2:DIST3
+# can see this in the conditional effects plot too, the direction/order stayed the same across treatments but the magnitude of change is different in CopperWeek2
+
+```
 
 
 
 # Further investigations
+
+```{r}
+#| label: split up interactions further
+#| eval: true
+#| echo: true
+
+#COPPER means conditional on DIST
+copper_brm2 |> 
+  emmeans(~COPPER | DIST, type = "response")
+
+#now want to look at comparisons
+copper_brm2 |> 
+  emmeans(~COPPER | DIST, type = "response") |> 
+  pairs()
+#these are on the fractional scale
+#density of worms is 30x higher in control vs Week 2 at distance 1
+```
 
