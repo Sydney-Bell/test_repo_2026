@@ -732,8 +732,7 @@ wq_sub_brm8 |>
 #| eval: true
 #| echo: true
 
-newdata <- data.frame(Mnth = seq(1, 12, len = 100)) |> 
-  crossing(dt_num = c(2005, 2014)) |> 
+newdata <- data.frame(Mnth = seq(1, 12, len = 100), dt_num = c(2005, 2014)) |> 
   mutate(Mnth1 = cos(2 * pi * Mnth / 12),
          Mnth2 = sin(2 *pi * Mnth / 12),
          Site = NA)
@@ -764,3 +763,4 @@ wq_sub_brm8 |>
 ```
 
 # References
+

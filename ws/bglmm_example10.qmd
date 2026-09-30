@@ -361,68 +361,210 @@ ltmp_sub_brm2 |>
 #| eval: true
 #| echo: true
 #| cache: false
+
 ltmp.form <- bf(
-    n.points | trials(total.points) ~ s(REPORT_YEAR) +
-        (1 | REEF_SITE) + (1 | REEF_SITE_TRANSECT),
-    family = binomial(link = "log")
-)
+    n.points | trials(total.points) ~ s(REPORT_YEAR, bs = "tp", k = 10) + #identifying thin plate spline and maximum number of knots
+        (1 | SITE_NO) + (1 | TRANSECT_NO),
+    family = binomial(link = "logit"))
+
 get_prior(ltmp.form, data = ltmp_sub)
+#intercept for continuous variable is the value of y when x = 0 (average coral cover for the average year)
+#when you ask for a spline, the data is automatically centered and scaled
+
 ltmp_sub |>
     summarise(
         Median = median(qlogis(HC/100)),
         MAD = mad(qlogis(HC/100)),
         N = mean(total.points)
     )
-priors <- prior(normal(-1.1, 0.8), class = "Intercept") +
+
+priors <- prior(normal(-1.1, 0.6), class = "Intercept") +
     prior(normal(0, 1), class = 'b') +
-    prior(student_t(3, 0, 1), class = 'sd') +
-    prior(student_t(3, 0, 10), class = 'sds')
+    prior(student_t(3, 0, 0.6), class = 'sd') + #use same MAD as Intercept
+    prior(student_t(3, 0, 15), class = 'sds') #MAD is usually half of the x axis (so if 30 years, then do 15)
+
+ltmp_sub.brm3 <- brm(ltmp.form,
+                  data = ltmp_sub,
+                  prior = priors,
+                  sample_prior = 'yes',
+                  iter = 5000,
+                  warmup = 1000,
+                  chains = 3, cores = 3,
+                  thin = 10,
+                  refresh = 100,
+                  control = list(adapt_delta = 0.99, max_treedepth = 20),
+                  backend = "cmdstanr",
+                  seed = 1
+                  )
+## save(ltmp_sub.brm4, file = '../ws/testing/ltmp_sub.brm4')
+ltmp_sub.brm3 |>
+  conditional_effects(conditions = data.frame(total.points = 200)) |>
+  plot(points = TRUE)
+#GAMs smooth over a lot!! Missing some of our coral declines and recovery
+#They are also know to struggle over the ends making them untrustworthy and trends are not stable
+#Gaps are also not handled well
+```
+
+```{r}
+#| label: as a gp
+#| results: markup
+#| eval: true
+#| echo: true
+#| cache: false
+
+#gp = gaussian process
+#it's great with gaps unlike gam
+ltmp.form <- bf(
+    n.points | trials(total.points) ~ gp(REPORT_YEAR, k = NA, cov = "exp_quad") +
+        (1 | SITE_NO) + (1 | TRANSECT_NO),
+    family = binomial(link = "logit"))
+
+#priors
+get_prior(ltmp.form, data = ltmp_sub)
+
+invgamma_from_weak_distance(
+  lower_distance = 0.10,
+  upper_distance = 0.5,
+  weak_correlation = 0.10,
+  probability = 0.90
+)
+
+standist::visualize("inv_gamma(4.6, 0.4", xlim = c(0,2))
+
+priors <- prior(normal(-1.1, 0.6), class = "Intercept") +
+    prior(student_t(3, 0, 0.6), class = 'sd') + #use same MAD as Intercept
+    prior(inv_gamma(4.6, 0.4), class = 'lscale', coef = "gpREPORT_YEAR") + #how quickly do I except correlation to decline
+    prior(student_t(3, 0, 0.6), class = 'sdgp') #same as sd
+
 ltmp_sub.brm4 <- brm(ltmp.form,
                   data = ltmp_sub,
                   prior = priors,
                   sample_prior = 'yes',
                   iter = 5000,
-                  warmup = 2000,
+                  warmup = 1000,
                   chains = 3, cores = 3,
                   thin = 10,
                   refresh = 100,
                   control = list(adapt_delta = 0.99, max_treedepth = 20),
-                  backend = "cmdstanr"
+                  backend = "cmdstanr",
+                  seed = 1
                   )
-## save(ltmp_sub.brm4, file = '../ws/testing/ltmp_sub.brm4')
+
+#raw data
 ltmp_sub.brm4 |>
   conditional_effects(conditions = data.frame(total.points = 200)) |>
   plot(points = TRUE)
 
-
-
-data.frame(mgcv::smoothCon(s(REPORT_YEAR), data = ltmp_sub)[[1]]$X) |>
-    head()
-## data.frame(mgcv::smoothCon(s(REPORT_YEAR, k=3),  data=ltmp_sub)[[1]]$REPORT_YEAR) |>
-##   bind_cols(ltmp_sub)
-
-gratia::basis(s(REPORT_YEAR),  data = ltmp_sub) |> gratia::draw()
-gratia::basis(s(REPORT_YEAR, bs='cr'),  data = ltmp_sub) |> gratia::draw()
-gratia::basis(s(REPORT_YEAR, bs='cr', k = 3),  data = ltmp_sub) |> gratia::draw()
-
-
-ltmp_glmm <- ltmp_sub.brm3 |>
-    emmeans(~fREPORT_YEAR, type = "response") |>
-    as.data.frame() |>
-    mutate(
-        fREPORT_YEAR = factor(fREPORT_YEAR, levels = rev(levels(fREPORT_YEAR))),
-        REPORT_YEAR = as.numeric(as.character(fREPORT_YEAR))
-    )
-
+#proportion of hard coral cover
 ltmp_sub.brm4 |>
-  conditional_effects() |>
-  plot() |>
-  _[[1]] +
-  geom_line(data = ltmp_glmm, inherit.aes = FALSE,
-    aes(y = prob, x = REPORT_YEAR), colour = "blue") +
-  geom_ribbon(data = ltmp_glmm, inherit.aes = FALSE,
-    aes(y = prob, x = REPORT_YEAR,
-      min = lower.HPD, ymax = upper.HPD), fill = "orange", alpha = 0.3) +
-  theme_classic() +
-  scale_y_continuous("Live hard coral cover", label = scales::percent_format())
+  conditional_effects(conditions = data.frame(total.points = 1))
+```
+
+```{r}
+#| label: diagnostics
+#| eval: true
+#| echo: true
+
+pars <- ltmp_sub.brm4 |> 
+  get_variables() |> 
+  str_subset("^b_.*|^sd.*")
+pars
+
+#ltmp_sub.brm4 |> SUYR_prior_and_posterior()
+#now do this
+ltmp_sub.brm4$fit |> stan_trace(pars = pars)
+
+ltmp_sub.brm4$fit |> stan_ac(pars = pars)
+
+ltmp_sub.brm4$fit |> stan_rhat()
+
+ltmp_sub.brm4$fit |> stan_ess()
+
+ltmp_sub.brm4 |> pp_check(type = 'dens_overlay', ndraws=100) 
+
+ltmp.resids <- make_brms_dharma_res(ltmp_sub.brm4, integerResponse = TRUE)
+testUniformity(ltmp.resids)
+plotResiduals(ltmp.resids, quantreg = FALSE, asFactor = FALSE)
+testDispersion(ltmp.resids)
+#nothing super obviously wrong, could increase iterations
+```
+
+```{r}
+#| label: predict
+#| eval: true
+#| echo: true
+
+#we want to predict to 2030
+newdata <- data.frame(REPORT_YEAR = seq(1995, 2030, len = 100), SITE_NO = NA, TRANSECT_NO = NA, 
+                      total.points = 1)
+head(newdata)
+
+ltmp_sub.brm4 |> 
+  epred_draws(newdata = newdata, re_formula = NA) |> 
+  ungroup() |> 
+  dplyr::select(-SITE_NO, -TRANSECT_NO, -.chain, -.iteration, -.row, -total.points) |> 
+  group_by(REPORT_YEAR) |> 
+  summarise_draws(median, HDInterval::hdi)
+
+ltmp_sub.brm4 |> 
+  epred_draws(newdata = newdata, re_formula = NA) |> 
+  ungroup() |> 
+  dplyr::select(-SITE_NO, -TRANSECT_NO, -.chain, -.iteration, -.row, -total.points) |> 
+  group_by(REPORT_YEAR) |> 
+  summarise_draws(median, HDInterval::hdi) |> 
+  ggplot(aes(y = median, x = REPORT_YEAR)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), 
+              fill = "orange", 
+              alpha = 0.4) +
+  geom_line(color = "black") +
+  geom_point() +
+  scale_y_continuous("Hard coral cover (%)", labels = function(x) x*100) +
+  theme_classic()
+```
+```{r}
+#| label: forecast plot
+#| eval: true
+#| echo: true
+
+ltmp_sub.brm4 |> 
+  epred_draws(newdata = newdata, re_formula = NA) |> 
+  ungroup() |> 
+  dplyr::select(.draw, REPORT_YEAR, .epred) |> 
+  mutate(flag = ifelse(REPORT_YEAR > 2023, "forecast", "historical")) |> 
+  ggplot(aes(y = .epred, x = REPORT_YEAR)) +
+  geom_line(aes(group = .draw, color = flag), alpha = 0.1) +
+  geom_point(data = ltmp_sub,
+             aes(y = HC/100, x = REPORT_YEAR))
+```
+
+```{r}
+#| label: comaprisons
+#| eval: true
+#| echo: true
+
+newdata <- data.frame(REPORT_YEAR = c(2017, 2023), SITE_NO = NA, TRANSECT_NO = NA, total.points = 1)
+
+ltmp_sub.brm4 |> 
+  epred_draws(newdata = newdata, re_formula = NA) |> 
+  #filter(.draw == 1) |> 
+  ungroup() |> 
+  group_by(.draw) |> 
+  summarise(diff = diff(.epred)) |> 
+  summarise_draws(median, HDInterval::hdi, Pl = ~mean(.x<0), Pg = ~mean(.x>0))
+
+#coral cover increases by 20% units from 2017-2023
+#this is on absolute scale/response scale
+
+#to get fold scale (ratio)
+#The core trick here is using logarithms (log) and exponentials (exp) to turn a subtraction (difference) into a division (ratio). In mathematics, subtracting logs is the same as dividing the original numbers: \(\log(B) - \log(A) = \log(B / A)\). By taking the exponential of that result, you get \(B / A\), which is the fold-change.
+ltmp_sub.brm4 |> 
+  epred_draws(newdata = newdata, re_formula = NA) |> 
+  ungroup() |> 
+  group_by(.draw) |> 
+  mutate(.epred = log(.epred)) |> #log scale
+  summarise(diff = diff(.epred)) |> #takes log difference --> aka log(B/A)
+  mutate(diff = exp(diff)) |> #exp to get B/A ratio (removes log)
+  summarise_draws(median, HDInterval::hdi, Pl = ~mean(.x<1), Pg = ~mean(.x>1))
+
+#coral cover has increased 2.77 times
 ```
