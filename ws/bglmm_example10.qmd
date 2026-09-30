@@ -249,10 +249,7 @@ ltmp_sub_brm2 |>
 
 ::: {.panel-tabset}
 
-```{r}
-#| label: diagnostics
-#| eval: true
-#| echo: true
+```{r diagnostics, eval=TRUE, echo=TRUE}
 
 ltmp_sub_brm2 |> 
   hypothesis("fYEAR2021=0") |> 
