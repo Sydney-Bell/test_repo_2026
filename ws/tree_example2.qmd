@@ -141,18 +141,152 @@ glimpse(leathwick)
 leathwick_test <- read_csv('../data/leathwick_test.csv', trim_ws=TRUE)
 glimpse(leathwick_test)
 ```
+# Prep data
 
+```{r}
+#| label: label
+#| eval: true
+#| echo: true
+
+#Site is categorical but wouldn't include this in a model because then you'd only be good at detecting presence at sites where you saw them
+#Method isn't relevant either because we just want to predict presence 
+```
 
 # Exploratory data analysis
 
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+scatterplotMatrix(~Angaus + SegSumT + SegTSeas + SegLowFlow + DSDist +
+                    DSMaxSlope + DSDam + USAvgT + USRainDays + USSlope +
+                    USNative + LocSed,
+                  data = leathwick,
+                  diagonal = list(method = "boxplot")) |> 
+  suppressWarnings() #or suppressMessages
+
+#monotonic trends?
+#1, 0, 0, -1, -1, 0, 0, 0, 0, 0, 0
+
+```
 
 # Fit the model
+```{r}
+#| label: regression tree
+#| eval: true
+#| echo: true
 
+leathwick_gbm <- gbm(Angaus ~ SegSumT + SegTSeas + SegLowFlow + DSDist +
+                    DSMaxSlope + DSDam + USAvgT + USRainDays + USSlope +
+                    USNative + LocSed,
+                  data = leathwick,
+                  distribution = "bernoulli", #loss function
+                  n.trees = 10000, #a good starting point
+                  var.monotone = c(1, 1, 0, -1, -1, 0, 1, -1, -1, -1, -1), #monotonic trends
+                  interaction.depth = 5, #how many splits does each tree have (typically 5, 7, or 9)
+                  shrinkage = 0.001, #learning rate, only going to retain 1% in memory
+                  bag.fraction = 0.5, #50% of data are in and 50% are out for testing at tree level
+                  train.fraction = 1, #determines how much is completely withheld and never seen by the model for training (1 = none withheld)
+                  n.minobsinnode = 10, #node cannot have less than 10 data points
+                  cv.folds = 10 #how many times should each tree be repeated
+                  )
+
+(best.iter <- gbm::gbm.perf(newman_gbm, method = 'cv')) #2981
+
+summary(leathwick_gbm, n.trees = best.iter)
+100/11 #anything over 9 so just SegSumT and USNative
+```
 
 # Partial plots
+```{r}
+#| label: partial plots
+#| eval: true
+#| echo: true
 
+attr(leathwick_gbm$Terms, "term.labels")
+
+plot(leathwick_gbm, 1, n.tree = best.iter)
+#when summer temp increases to 15C or more, eel presence increases
+
+#a nicer way to plot these
+leathwick_gbm |> 
+  pdp::partial(pred.var = 'SegSumT',
+               n.trees = best.iter,
+               type = "regression",
+               recursive = FALSE,
+               #ice = TRUE,
+               inv.link = exp) |> 
+  autoplot()
+```
 
 # Assessing accuracy
+```{r}
+#| label: assessing accuracy
+#| eval: true
+#| echo: true
+
+#use test data to assess accuracy...compare observed and predicted
+head(leathwick_test)
+
+leathwick_test <- leathwick_test |> 
+  mutate(pred = predict(leathwick_gbm, newdata = leathwick_test, n.trees = best.iter))
+
+head(leathwick_test)
+#output is on logit scale but need them on response scale
+
+leathwick_test <- leathwick_test |> 
+  mutate(pred = plogis(pred))
+
+head(leathwick_test) #now they are on the response scale!
+
+leathwick_test |> 
+  ggplot(aes(y = pred, x = factor(Angaus_obs))) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.05)) #add raw data points
+
+#now split the dataset into 2 groups: absence and presence
+pres <- leathwick_test |> 
+  filter(Angaus_obs == 1) |> 
+  pull(pred)
+
+abs <- leathwick_test |> 
+  filter(Angaus_obs == 0) |> 
+  pull(pred)
+
+#run evaluate to estimate the accuracy of our tree as a predictive machine
+e <- dismo::evaluate(p = pres, a = abs)
+e
+#accuracy of 86%
+#max TPR+TNR = threshold for where the data splits into abs and pres
+```
+```{r}
+#| label: spatial data
+#| eval: true
+#| echo: true
+
+data("Anguilla_grids")
+plot(Anguilla_grids)
+
+#can predict in space now
+fit <- predict(Anguilla_grids, leathwick_gbm,
+               n.trees = best.iter, type = "response")
+plot(fit) #dark green = higher presence
+
+#pretty plot
+#install.packages("stars")
+library(stars)
+
+#convert fit to stars object
+fit <- stars::st_as_stars(fit)
+
+ggplot() +
+  geom_stars(data = fit) +
+  scale_fill_gradient(low = "red", high = "green", "Probability\nof occurance", 
+                      na.value = NA) +
+  coord_sf(expand = FALSE) + #so there aren't 4% gaps around the whole graphic
+  theme_bw()
+```
 
 
 # References

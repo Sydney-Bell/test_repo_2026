@@ -1,0 +1,365 @@
+---
+title: "Regression trees example 1"
+author: "Murray Logan"
+date: today
+date-format: "DD/MM/YYYY"
+format: 
+  html:
+    ## Format
+    theme: [default, ../resources/ws-style.scss]
+    css: ../resources/ws_style.css
+    html-math-method: mathjax
+    ## Table of contents
+    toc: true
+    toc-float: true
+    ## Numbering
+    number-sections: true
+    number-depth: 3
+    ## Layout
+    page-layout: full
+    fig-caption-location: "bottom"
+    fig-align: "center"
+    fig-width: 4
+    fig-height: 4
+    fig-dpi: 72
+    tbl-cap-location: top
+    ## Code
+    code-fold: false
+    code-tools: true
+    code-summary: "Show the code"
+    code-line-numbers: true
+    code-block-border-left: "#ccc"
+    code-copy: true
+    highlight-style: atom-one
+    ## Execution
+    execute:
+      echo: true
+      cache: true
+    ## Rendering
+    embed-resources: true
+crossref:
+  fig-title: '**Figure**'
+  fig-labels: arabic
+  tbl-title: '**Table**'
+  tbl-labels: arabic
+engine: knitr
+output_dir: "docs"
+documentclass: article
+fontsize: 12pt
+mainfont: Arial
+mathfont: LiberationMono
+monofont: DejaVu Sans Mono
+classoption: a4paper
+bibliography: ../resources/references.bib
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+knitr::opts_chunk$set(cache = TRUE, cache.lazy = FALSE, tidy='styler')
+```
+
+# Preparations
+
+Load the necessary libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(gbm)         #for gradient boosted models
+library(car)
+library(dismo)
+library(pdp)
+library(ggfortify)
+library(randomForest)
+library(tidyverse)
+library(gridExtra)
+library(patchwork)
+library(easystats)
+```
+
+# Scenario
+
+@Loyn-1987-1987 modelled the abundance of forest birds with six predictor
+variables (patch area, distance to nearest patch, distance to nearest
+larger patch, grazing intensity, altitude and years since the patch had
+been isolated).
+
+![Regent honeyeater](../resources/regent_honeyeater_small.jpg){#fig-honeyeater width="165" height="240"}
+
+
+ABUND   DIST   LDIST   AREA   GRAZE   ALT   YR.ISOL
+------- ------ ------- ------ ------- ----- ---------
+..      ..     ..      ..     ..      ..    ..
+
+: Format of loyn.csv data file {#tbl-loyn .table-condensed}
+
+------------- ------------------------------------------------------------------------------
+**ABUND**     Abundance of forest birds in patch- response variable
+**DIST**      Distance to nearest patch - predictor variable
+**LDIST**     Distance to nearest larger patch - predictor variable
+**AREA**      Size of the patch - predictor variable
+**GRAZE**     Grazing intensity (1 to 5, representing light to heavy) - predictor variable
+**ALT**       Altitude - predictor variable
+**YR.ISOL**   Number of years since the patch was isolated - predictor variable
+------------- ------------------------------------------------------------------------------
+
+: Description of the variables in the loyn data file {#tbl-loyn1 .table-condensed}
+
+The aim of the analysis is to investigate the effects of a range of
+predictors on the abundance of forest birds.
+
+We have previously analysed these data in [Example
+4](glm_example4.html) and the Bayesian version ([Example
+4](bglm_example4.html)). On those occasions, we used a multiple linear
+model with scaled predictors (some of which were also log-transformed)
+against a lognormal distribution.
+
+On this occassion we will take a different approach. We will use
+regression trees in order to explore which variables might be
+"important" drivers of bird abundances and the possible nature of any
+relationships and interactions. Such an analysis might help refine
+sensible candidate models to explore via linear modelling, yet might
+also serve as either an analysis in its own right
+
+# Read in the data
+
+```{r readData, results='markdown', eval=TRUE}
+loyn <- read_csv('../data/loyn.csv', trim_ws=TRUE)
+glimpse(loyn)
+```
+
+# Prep data
+```{r}
+#| label: prep data
+#| eval: true
+#| echo: true
+
+#declare categorical variables
+loyn <- loyn |> 
+  mutate(
+    fGRAZE = factor(GRAZE)
+  )
+
+```
+
+# Exploratory data analysis 
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
+
+#put response first
+scatterplotMatrix(~ABUND+AREA+YR.ISOL+DIST+LDIST+fGRAZE+ALT, data = loyn,
+                  diagonal = list(method = 'boxplot'))
+
+#monotonic trends = 1, 1, 1, 0, -1, 1
+```
+
+
+# Fit the model
+```{r}
+#| label: fit model
+#| eval: true
+#| echo: true
+
+#all predictors are additive, no interactions because gbm automatically will include interactions
+loyn_gbm <- gbm(ABUND ~ AREA + YR.ISOL + DIST + LDIST + fGRAZE + ALT,
+                  data = loyn,
+                  distribution = "gaussian", #loss function
+                  n.trees = 10000, #a good starting point
+                  var.monotone = c(1, 1, 1, 0, -1, 1), #monotonic trends
+                  interaction.depth = 5, #how many splits does each tree have (typically 5, 7, or 9)
+                  shrinkage = 0.001, #learning rate, only going to retain 1% in memory
+                  bag.fraction = 0.5, #50% of data are in and 50% are out for testing at tree level
+                  train.fraction = 1, #determines how much is completely withheld and never seen by the model for training (1 = none withheld)
+                  n.minobsinnode = 10, #node cannot have less than 10 data points
+                  cv.folds = 10 #how many times should each tree be repeated
+                  )
+
+(best.iter <- gbm::gbm.perf(loyn_gbm, method = 'cv'))
+#5337 trees!
+```
+
+# Explore relative influence
+```{r}
+#| label: relative influence
+#| eval: true
+#| echo: true
+
+summary(loyn_gbm, n.trees = best.iter)
+100/6 #16.67
+#AREA and fGRAZE are the most important
+```
+
+# Explore partial effects
+```{r}
+#| label: partial effects plot
+#| eval: true
+#| echo: true
+
+attr(loyn_gbm$Terms, "term.labels")
+
+plot(loyn_gbm, 1, n.tree = best.iter)
+#as reef complexity increases, fish richness increases
+
+plot(loyn_gbm, 5, n.tree = best.iter)
+#as octocoral height increases, fish richness increases and then decreases
+
+#a nicer way to plot these
+loyn_gbm |> 
+  pdp::partial(pred.var = 'AREA',
+               n.trees = best.iter,
+               type = "regression",
+               recursive = FALSE,
+               ice = TRUE,
+               inv.link = NULL, #set to null because gaussian
+               grid.resolution = 1000) |> #increase resolution to 1000
+  autoplot() +
+  scale_x_log10() 
+
+loyn_gbm |> 
+  pdp::partial(pred.var = 'fGRAZE',
+               n.trees = best.iter,
+               type = "regression", 
+               recursive = FALSE,
+               ice = TRUE,
+               inv.link = NULL #set to null because gaussian
+              ) |> 
+  autoplot() 
+  
+```
+
+# Explore interactions 
+
+
+# Tuning
+
+
+# Bootstrapping
+```{r}
+#| label: bootstrapping
+#| eval: true
+#| echo: true
+
+#goal is to create a partial plot for AREA
+
+#Create 2 lists:
+ # - relative_influence_list
+ # - prediction_list
+
+#Need to create newdata (dataset for predictions)
+
+#Step 1: Resample the data
+#Step 2. Fit a tree
+#Step 3. Cross validation (figure out optimal number of trees)
+#Step 4. Calculate relative influence (how important was each predictor)
+#Step 5. Predict
+
+#Compile relative influence -> plot
+#Compile predictions -> plot
+
+#and we want to do this multiple times (10x)
+#need to create a loop
+
+nBoot <- 10 #number of bootstraps
+rel_inf_list <- vector("list", nBoot) #empty list with 10 spaces
+pred_list <- vector("list", nBoot)
+newdata <- with(loyn, data.frame(
+  AREA = seq(min(AREA), 
+             max(AREA), len = 100), 
+  YR.ISOL = mean(YR.ISOL),
+  DIST = mean(DIST),
+  LDIST = mean(LDIST),
+  ALT = mean(ALT))) |> 
+  crossing(fGRAZE = levels(loyn$fGRAZE))
+
+#could do log min AREA and log max AREA and then at the end of this section
+#use mutate() to get log AREA back to AREA for predictions\
+                      
+
+for (i in 1:nBoot) {
+  print(paste("Bootstrap no.", i))
+  
+  dat <- loyn |> 
+    sample_n(size = n(), replace = TRUE)
+  
+  mod_gbm <- gbm(ABUND ~ AREA + YR.ISOL + DIST + LDIST + fGRAZE + ALT,
+                  data = dat,
+                  distribution = "gaussian", 
+                  n.trees = 10000, 
+                  var.monotone = c(1, 1, 1, 0, -1, 1), 
+                  interaction.depth = 5, 
+                  shrinkage = 0.001, 
+                  bag.fraction = 0.5, 
+                  train.fraction = 1, 
+                  n.minobsinnode = 10, 
+                  cv.folds = 10
+                  )
+  
+  best.iter <- gbm::gbm.perf(mod_gbm, method = 'cv')
+  
+  rel_inf_list[[i]] <- summary(mod_gbm, Boot = i, n.trees = best.iter)
+  
+  fit <- predict(mod_gbm, newdata = newdata, n.trees = best.iter)
+  pred_list[[i]] <- data.frame(newdata, Fit = fit, Boot = i)
+  
+}
+
+#check
+str(rel_inf_list)
+
+#compile relative influences and make a plot
+rel_inf <- do.call("rbind", rel_inf_list) #do this, on this (aka take list and bind all the shelves into one)
+head(rel_inf)
+
+#rel_inf |> 
+#  group_by(var) |> 
+#  posterior::summarise_draws(median, HDInterval::hdi)
+
+rel_inf |> 
+  group_by(var) |> 
+  summarise(median = median(rel.inf), lower = HDInterval::hdi(rel.inf)[1], upper = HDInterval::hdi(rel.inf)[2])
+
+#plot of medians and relative importance
+g1 <- rel_inf |> 
+  group_by(var) |> 
+  summarise(median = median(rel.inf), 
+            lower = HDInterval::hdi(rel.inf)[1], 
+            upper = HDInterval::hdi(rel.inf)[2]) |> 
+  ggplot(aes(x = median, y = reorder(var, median))) + #orders variables by median
+  geom_pointrange(aes(xmin = lower, xmax = upper)) +
+  geom_vline(xintercept = 16.66, linetype = "dashed")
+g1
+
+#plot with uncertainty
+pred <- do.call("rbind", pred_list)
+#Fit is on a log scale though so we need to back transform
+pred <- pred |> 
+  #mutate(Fit = exp(Fit)) |> 
+  group_by(fGRAZE, AREA) |> 
+  tidybayes::median_hdci(Fit) #or use summarise_draws
+pred
+
+g2 <- pred |> 
+  ggplot(aes(y = Fit, x = log(AREA), fill = fGRAZE)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3) +
+  geom_line(aes(color = fGRAZE))
+g2
+
+g2 | g1 #two plots side by side
+
+g1 + patchwork::inset_element(g2, left = 0.4, bottom = 0.01, right = 1, top = 0.4) & theme_classic()
+
+g2 + patchwork::inset_element(g1, left = 0.01, bottom = 0.01, right = 0.5, top = 0.35) & theme_classic()
+
+```
+
+
+# References

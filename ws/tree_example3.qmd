@@ -1,5 +1,5 @@
 ---
-title: "Regression trees example 1"
+title: "Regression trees example 3"
 author: "Murray Logan"
 date: today
 date-format: "DD/MM/YYYY"
@@ -74,9 +74,11 @@ Load the necessary libraries
 
 library(gbm)         #for gradient boosted models
 ## library(gbm3)         #for gradient boosted models
+#install.packages("pdp")
 library(car)
 library(pdp)
 library(ggfortify)
+#install.packages("randomForest")
 library(randomForest)
 library(tidyverse)
 library(patchwork)
@@ -125,19 +127,284 @@ Format of newman.csv data file
 newman <- read_csv('../data/newman.csv', trim_ws=TRUE)
 glimpse(newman)
 ```
+# Prepare data
+```{r}
+#| label: prep data
+#| eval: true
+#| echo: true
 
+#remove spaces in variable names
+#take all names and replace spaces with _
+names(newman) <- str_replace_all(names(newman), " ", "_")
+names(newman)
+
+#declare categorical variables
+newman <- newman |> 
+  mutate(
+    fCountry = factor(Country),
+    fReef_complexity = factor(Reef_complexity)
+  )
+```
 
 # Exploratory data analysis
+```{r}
+#| label: scatterplot
+#| eval: true
+#| echo: true
 
+scatterplotMatrix(~total_rich + Reef_complexity + No_tall_corals +
+                    No_corals + Sponge_max_height + Octocoral_max_height +
+                    Slope_angle + fCountry, data = newman,
+                  diagonal = list(method = 'boxplot'))
+
+#dont use assumptions like we normally do
+#dont need to transform variables
+
+#but do need to decide what loss function to use
+# we have count data --> Poisson distribution --> log --> Poisson loss function
+
+#if you want to know what variables are most important and get a partial effects plot, then you shouldn't put correlated predictors into the same regression tree
+
+#enforce monotonic trends on anything?
+# look at top row
+#never impose monotonic trend on categorical variables
+#the next 3 seem positive, octocoral height leave 0, slope positive, and remove country because it will likely outcompete the other variables
+
+#every predictor is either positive (1), none (0), or negative (-1)
+```
 
 # Fit the model
+```{r}
+#| label: fit model
+#| eval: true
+#| echo: true
 
+#all predictors are additive, no interactions because gbm automatically will include interactions
+newman_gbm <- gbm(fish_rich ~ fReef_complexity +
+                    No_tall_corals +
+                    No_corals +
+                    Sponge_max_height +
+                    Octocoral_max_height +
+                    Slope_angle,
+                  data = newman,
+                  distribution = "poisson", #loss function
+                  n.trees = 10000, #a good starting point
+                  var.monotone = c(0, 1, 1, 1, 0, 1), #monotonic trends
+                  interaction.depth = 5, #how many splits does each tree have (typically 5, 7, or 9)
+                  shrinkage = 0.001, #learning rate, only going to retain 1% in memory
+                  bag.fraction = 0.5, #50% of data are in and 50% are out for testing at tree level
+                  train.fraction = 1, #determines how much is completely withheld and never seen by the model for training (1 = none withheld)
+                  n.minobsinnode = 10, #node cannot have less than 10 data points
+                  cv.folds = 10 #how many times should each tree be repeated
+                  )
+
+#need to determine when to cutoff models (aka optimal number of trees)
+
+#Option 1
+(best.iter <- gbm::gbm.perf(newman_gbm, method = 'OOB'))
+#there is a single number print out that tells you the optimal trees
+#in this case 102 trees
+#but we think it learned too fast, so now we have to tell it to redo it
+#NEED to achieve 1000 minimum trees
+
+#Option 2
+(best.iter <- gbm::gbm.perf(newman_gbm, method = 'cv'))
+#says only 30 trees, so even worse
+#green line represents how well it is predicting, want the dip above 1000
+
+#need to make model run slower! Changing shrinkage from 0.1 to 0.001
+
+#now we get 1965 trees and 2981 trees!
+```
 
 # Explore relative influence
+```{r}
+#| label: relative influence
+#| eval: true
+#| echo: true
 
+summary(newman_gbm, n.trees = best.iter)
+#reef complexity is the most important
+
+#we have 6 variables so if we split up the 100% by 6 we see what variables have a higher % and they are therefore better than random
+100/6
+#anything above 16.67 is important/justifiable to keep
+```
 
 # Explore partial effects
 
+```{r}
+#| label: partial effects plots
+#| eval: true
+#| echo: true
+
+
+attr(newman_gbm$Terms, "term.labels")
+
+plot(newman_gbm, 1, n.tree = best.iter)
+#as reef complexity increases, fish richness increases
+
+plot(newman_gbm, 5, n.tree = best.iter)
+#as octocoral height increases, fish richness increases and then decreases
+
+#a nicer way to plot these
+newman_gbm |> 
+  pdp::partial(pred.var = 'Octocoral_max_height',
+               n.trees = best.iter,
+               type = "regression",
+               recursive = FALSE,
+               ice = TRUE,
+               inv.link = exp) |> 
+  autoplot()
+
+#but all of these plots are missing uncertainty, have to add ice = TRUE to get the machine learning community's version of uncertainty...but its not true uncertainty
+
+#other option is bootstrapping
+```
 
 # Bootstrapping
+```{r}
+#| label: bootstrapping
+#| eval: true
+#| echo: true
 
+#goal is to create a partial plot for Octocoral_max_height
+
+#Create 2 lists:
+ # - relative_influence_list
+ # - prediction_list
+
+#Need to create newdata (dataset for predictions)
+
+#Step 1: Resample the data
+#Step 2. Fit a tree
+#Step 3. Cross validation (figure out optimal number of trees)
+#Step 4. Calculate relative influence (how important was each predictor)
+#Step 5. Predict
+
+#Compile relative influence -> plot
+#Compile predictions -> plot
+
+#and we want to do this multiple times (10x)
+#need to create a loop
+
+nBoot <- 10 #number of bootstraps
+rel_inf_list <- vector("list", nBoot) #empty list with 10 spaces
+pred_list <- vector("list", nBoot)
+newdata <- with(newman, data.frame(
+  Octocoral_max_height = seq(min(Octocoral_max_height), 
+                             max(Octocoral_max_height), len = 100), 
+  No_tall_corals = mean(No_tall_corals),
+  No_corals = mean(No_corals),
+  Sponge_max_height = mean(Sponge_max_height),
+  Slope_angle = mean(Slope_angle))) |> 
+  crossing(fReef_complexity = levels(newman$fReef_complexity))
+                      
+
+for (i in 1:nBoot) {
+  print(paste("Bootstrap no.", i))
+  
+  dat <- newman |> 
+    sample_n(size = n(), replace = TRUE)
+  
+  mod_gbm <- gbm(fish_rich ~ fReef_complexity +
+                    No_tall_corals +
+                    No_corals +
+                    Sponge_max_height +
+                    Octocoral_max_height +
+                    Slope_angle,
+                  data = dat,
+                  distribution = "poisson", 
+                  n.trees = 10000, 
+                  var.monotone = c(0, 1, 1, 1, 0, 1), 
+                  interaction.depth = 5, 
+                  shrinkage = 0.001, 
+                  bag.fraction = 0.5, 
+                  train.fraction = 1, 
+                  n.minobsinnode = 10, 
+                  cv.folds = 10
+                  )
+  
+  best.iter <- gbm::gbm.perf(mod_gbm, method = 'cv')
+  
+  rel_inf_list[[i]] <- summary(mod_gbm, Boot = i, n.trees = best.iter)
+  
+  fit <- predict(mod_gbm, newdata = newdata, n.trees = best.iter)
+  pred_list[[i]] <- data.frame(newdata, Fit = fit, Boot = i)
+  
+}
+
+#check
+str(rel_inf_list)
+
+#compile relative influences and make a plot
+rel_inf <- do.call("rbind", rel_inf_list) #do this, on this (aka take list and bind all the shelves into one)
+head(rel_inf)
+
+#rel_inf |> 
+#  group_by(var) |> 
+#  posterior::summarise_draws(median, HDInterval::hdi)
+
+rel_inf |> 
+  group_by(var) |> 
+  summarise(median = median(rel.inf), lower = HDInterval::hdi(rel.inf)[1], upper = HDInterval::hdi(rel.inf)[2])
+
+#plot of medians and relative importance
+g1 <- rel_inf |> 
+  group_by(var) |> 
+  summarise(median = median(rel.inf), 
+            lower = HDInterval::hdi(rel.inf)[1], 
+            upper = HDInterval::hdi(rel.inf)[2]) |> 
+  ggplot(aes(x = median, y = reorder(var, median))) + #orders variables by median
+  geom_pointrange(aes(xmin = lower, xmax = upper)) +
+  geom_vline(xintercept = 16.66, linetype = "dashed")
+g1
+
+#plot with uncertainty
+pred <- do.call("rbind", pred_list)
+#Fit is on a log scale though so we need to back transform
+pred <- pred |> 
+  mutate(Fit = exp(Fit)) |> 
+  group_by(fReef_complexity, Octocoral_max_height) |> 
+  tidybayes::median_hdci(Fit) #or use summarise_draws
+pred
+
+g2 <- pred |> 
+  ggplot(aes(y = Fit, x = Octocoral_max_height, fill = fReef_complexity)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3) +
+  geom_line(aes(color = fReef_complexity))
+g2
+
+g2 | g1 #two plots side by side
+
+g1 + patchwork::inset_element(g2, left = 0.4, bottom = 0.01, right = 1, top = 0.4) & theme_classic()
+
+g2 + patchwork::inset_element(g1, left = 0.01, bottom = 0.01, right = 0.5, top = 0.35) & theme_classic()
+
+```
+
+# Try random forest model
+```{r}
+#| label: random forest code
+#| eval: true
+#| echo: true
+
+newman.rf <- randomForest(
+  fish_rich ~ 
+    fReef_complexity +
+    No_tall_corals +
+    No_corals +
+    Sponge_max_height +
+    Octocoral_max_height +
+    Slope_angle,
+  data = newman, 
+  importance = TRUE,
+  ntree = 1000
+)
+
+#extract importance values
+newman.imp <- randomForest::importance(newman.rf)
+100 * newman.imp / sum(newman.imp)
+#%IncMSE = if you left out Octocoral_max_height, you would have the most residuals or unexplained variance, therefore it is the most important
+#IncNodePurity = leaving the no_tall_corals out, leads to the most inaccuracies
+```
